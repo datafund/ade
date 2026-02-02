@@ -1073,16 +1073,32 @@ export async function buy(opts: BuyOpts, keychain: Keychain = defaultKeychain): 
     )
   }
 
-  // 3. Check balance
+  // 3. Estimate gas and check balance
+  const gasEstimate = await pub.estimateContractGas({
+    address: chainConfig.escrowAddress,
+    abi: DataEscrowABI,
+    functionName: 'fundEscrow',
+    args: [escrowId],
+    value: amount,
+    account: address,
+  }).catch((err) => {
+    throw new CLIError('ERR_API_ERROR', `Gas estimation failed: ${err.message}`)
+  })
+
+  const gasPrice = await pub.getGasPrice()
+  const gasCost = gasEstimate * gasPrice
+  const totalRequired = amount + gasCost
+
   const balance = await pub.getBalance({ address })
-  if (balance < amount) {
+  if (balance < totalRequired) {
     throw new CLIError(
       'ERR_INSUFFICIENT_BALANCE',
-      `Insufficient balance: ${formatEther(balance)} ETH, need ${formatEther(amount)} ETH`
+      `Insufficient balance: ${formatEther(balance)} ETH, need ${formatEther(amount)} ETH + ~${formatEther(gasCost)} ETH gas`
     )
   }
 
   console.error(`\nFunding escrow #${opts.escrowId} with ${formatEther(amount)} ETH...`)
+  console.error(`  Estimated gas: ~${formatEther(gasCost)} ETH`)
   await confirmAction('Confirm funding?', opts)
 
   // 4. Fund escrow
