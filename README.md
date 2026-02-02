@@ -40,6 +40,8 @@ Store your credentials securely in the OS keychain:
 |--------|----------|-------------|
 | `SX_KEY` | **Yes** (for write commands) | Ethereum private key for signing transactions |
 | `SX_RPC` | No | RPC URL (defaults to https://mainnet.base.org) |
+| `BEE_API` | **Yes** (for `ade create`) | Bee node URL (e.g., http://localhost:1633) |
+| `BEE_STAMP` | **Yes** (for `ade create`) | Postage batch ID (64 hex chars) |
 | `SX_API` | No | API URL (defaults to https://agents.datafund.io) |
 
 **Quick setup for write commands:**
@@ -142,32 +144,89 @@ ade skills create --title "My Skill" --price 0.1 [--category <cat>] [--tags <tag
 ade bounties create --title "Fix Bug" --reward 0.5 [--description <desc>]
 ```
 
-### Escrow Commands (Requires SX_KEY)
+### Unified Escrow Creation (Recommended)
 
-The escrow workflow for fair data exchange:
+The `ade create` command handles the complete seller workflow in a single step:
 
 ```bash
-# 1. Seller creates escrow (auto-stores encryption keys in keychain)
-ade escrows create --content-hash 0x... --price 0.1 [--chain base|baseSepolia]
-
-# 2. Buyer funds escrow
-ade escrows fund <id> [--chain base|baseSepolia]
-
-# 3. Seller commits key (reads stored keys from keychain)
-ade escrows commit-key <id> [--chain base|baseSepolia]
-
-# 4. Seller reveals key after delay
-ade escrows reveal-key <id> --buyer-pubkey 0x... [--chain base|baseSepolia]
-
-# 5. Seller claims payment after dispute window
-ade escrows claim <id> [--chain base|baseSepolia]
+# One command to encrypt, upload, and create escrow
+ade create --file ./data.csv --price 0.1 --yes
 ```
 
-When you create an escrow, the encryption key and salt are automatically stored:
+This automatically:
+1. Reads and encrypts your file with AES-256-GCM
+2. Uploads encrypted data to Swarm
+3. Creates escrow on-chain with key commitment
+4. Stores encryption keys in OS keychain
+
+**Required secrets for `ade create`:**
+```bash
+ade set SX_KEY      # Your private key for transactions
+ade set BEE_API     # Bee node URL (e.g., http://localhost:1633)
+ade set BEE_STAMP   # Postage batch ID (64 hex chars)
+```
+
+**Example output:**
+```json
+{
+  "escrowId": 42,
+  "txHash": "0x...",
+  "swarmRef": "abc123...",
+  "contentHash": "0x...",
+  "encryptionKey": "0x...",
+  "salt": "0x..."
+}
+```
+
+### Complete Seller Flow
+
+```bash
+# 1. Configure (one-time setup)
+ade set SX_KEY      # Your private key
+ade set BEE_API     # http://localhost:1633 (your Bee node)
+ade set BEE_STAMP   # Your postage batch ID
+
+# 2. Create escrow from file
+ade create --file ./data.pdf --price 0.1 --yes
+# Outputs: escrowId, swarmRef, encryptionKey, etc.
+
+# 3. Share escrow ID with buyer
+# Buyer funds via: ade escrows fund 42 --yes
+
+# 4. Release key (after buyer funds)
+ade escrows commit-key 42 --yes
+# Wait 2 blocks + 60 seconds...
+ade escrows reveal-key 42 --yes
+
+# 5. Claim payment (after 24h dispute window)
+ade escrows claim 42 --yes
+```
+
+### Manual Escrow Commands
+
+For more control, you can use individual escrow commands:
+
+```bash
+# Create escrow manually (requires pre-computed content hash)
+ade escrows create --content-hash 0x... --price 0.1
+
+# Fund an escrow (as buyer)
+ade escrows fund <id>
+
+# Commit key release (as seller, reads keys from keychain)
+ade escrows commit-key <id>
+
+# Reveal key after delay (as seller)
+ade escrows reveal-key <id>
+
+# Claim payment after dispute window (as seller)
+ade escrows claim <id>
+```
+
+When you create an escrow, keys are automatically stored in keychain:
 - `ESCROW_<id>_KEY` - The encryption key
 - `ESCROW_<id>_SALT` - The salt for commitment
-
-This eliminates the need to manually save these values.
+- `ESCROW_<id>_SWARM` - Swarm reference (for `ade create`)
 
 ### Supported Chains
 

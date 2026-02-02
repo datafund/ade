@@ -9,7 +9,7 @@ const ACTIONS: Record<Resource, string[]> = {
   skills: ['list', 'show', 'vote', 'comment', 'create'],
   bounties: ['list', 'show', 'create'],
   agents: ['list', 'show'],
-  escrows: ['list', 'show', 'create', 'fund', 'commit-key', 'reveal-key', 'claim'],
+  escrows: ['list', 'show', 'create', 'fund', 'commit-key', 'reveal-key', 'claim', 'status'],
   wallets: ['list'],
   config: ['show'],
 }
@@ -26,11 +26,20 @@ Secret Management:
   rm <key>             Remove a secret
   ls                   List all secret keys
 
+Data Escrow (Seller Flow):
+  create               Create escrow from file (encrypt + upload + escrow)
+  escrows              Manage data escrows
+
+Data Escrow (Buyer Flow):
+  buy <id>             Fund, wait for key, download, decrypt
+
+Bounty Response:
+  respond <id>         Respond to bounty with deliverable
+
 Skill Exchange:
   skills               Manage skill listings
   bounties             Manage bounties
   agents               View agents and reputation
-  escrows              Manage data escrows
   wallets              View wallets
   config               View configuration
 
@@ -46,21 +55,45 @@ Options:
   --help, -h           Show help for any command
 
 Examples:
-  ade set SX_KEY              # Store private key in keychain
-  ade skills list             # List all skills
-  ade escrows create --help   # Show help for creating escrows
+  # Seller: Create escrow from file
+  ade create --file data.csv --price 0.1 --yes
+
+  # Buyer: Purchase escrowed data
+  ade buy 42 --output ./data.csv --yes
+
+  # Respond to bounty
+  ade respond abc123 --file ./solution.zip --yes
+
+  # Check escrow status
+  ade escrows status 42
 
 Configuration (stored via 'ade set'):
   SX_KEY     Private key for signing/chain ops
-  SX_RPC     Base chain RPC URL
+  SX_RPC     Base chain RPC URL (default: https://mainnet.base.org)
+  BEE_API    Bee node URL (e.g., http://localhost:1633)
+  BEE_STAMP  Postage batch ID (64 hex chars)
   SX_API     Custom API URL (default: https://agents.datafund.io)`)
 }
 
 export function showResourceHelp(resource: string): void {
+  // Handle meta commands
+  if (resource === 'create') {
+    showCreateHelp()
+    return
+  }
+  if (resource === 'buy') {
+    showBuyHelp()
+    return
+  }
+  if (resource === 'respond') {
+    showRespondHelp()
+    return
+  }
+
   if (!RESOURCES.includes(resource as Resource)) {
     console.log(`Unknown resource: ${resource}
 
-Available resources: ${RESOURCES.join(', ')}
+Available resources: ${RESOURCES.join(', ')}, create, buy, respond
 
 Run 'ade help' for overview.`)
     return
@@ -82,6 +115,155 @@ Actions:`)
 For detailed help on an action:
   ade ${resource} <action> --help
   ade help ${resource} <action>`)
+}
+
+function showCreateHelp(): void {
+  console.log(`ade create - Create data escrow from file
+
+USAGE:
+  ade create --file <path> --price <eth> [options]
+
+DESCRIPTION:
+  The unified seller command that handles the complete escrow creation flow:
+  1. Reads and encrypts your file with AES-256-GCM
+  2. Uploads encrypted data to Swarm
+  3. Creates escrow on-chain with key commitment
+  4. Stores encryption keys in OS keychain
+
+REQUIRED:
+  --file <path>      File to encrypt and escrow (max 50MB)
+  --price <eth>      Price in ETH (e.g., "0.1")
+
+OPTIONS:
+  --title <text>     Title for the data
+  --description <text>  Description
+  --dry-run          Validate everything without executing (no uploads, no tx)
+  --yes              Skip confirmation prompt
+
+REQUIRED SECRETS (set via 'ade set'):
+  SX_KEY            Private key for transactions
+  BEE_API           Bee node URL (e.g., http://localhost:1633)
+  BEE_STAMP         Postage batch ID (64 hex chars)
+
+EXAMPLES:
+  # Create escrow from CSV file
+  ade create --file ./data.csv --price 0.01
+
+  # Dry run to validate without spending gas
+  ade create --file ./data.csv --price 0.1 --dry-run
+
+  # Create with metadata and skip confirmation
+  ade create --file ./report.pdf --price 0.1 --title "Q4 Report" --yes
+
+OUTPUT:
+  Returns escrow ID, transaction hash, Swarm reference, and encryption keys.
+  Keys are automatically stored in keychain as:
+    ESCROW_<id>_KEY           Encryption key
+    ESCROW_<id>_SALT          Salt for commitment
+    ESCROW_<id>_SWARM         Swarm reference
+    ESCROW_<id>_CONTENT_HASH  Content hash for verification
+
+NEXT STEPS:
+  After buyer funds the escrow:
+    ade escrows commit-key <id> --yes
+    # Wait 2 blocks + 60 seconds
+    ade escrows reveal-key <id> --yes
+    # After 24h dispute window
+    ade escrows claim <id> --yes`)
+}
+
+function showBuyHelp(): void {
+  console.log(`ade buy - Complete buyer flow for data escrow
+
+USAGE:
+  ade buy <escrow-id> [options]
+
+DESCRIPTION:
+  One command to purchase escrowed data:
+  1. Reads escrow details from chain (price, seller, content hash)
+  2. Verifies you have sufficient balance
+  3. Funds the escrow
+  4. Waits for seller to reveal the encryption key
+  5. Downloads encrypted data from Swarm
+  6. Verifies content hash matches on-chain hash
+  7. Decrypts data with revealed key
+  8. Writes to output file
+
+ARGUMENTS:
+  <escrow-id>        The escrow ID to purchase (required)
+
+OPTIONS:
+  --output <path>    Output file path (default: escrow_<id>_data)
+  --wait-timeout <s> Seconds to wait for key reveal (default: 86400 = 24h)
+  --yes              Skip confirmation prompt
+
+REQUIRED SECRETS (set via 'ade set'):
+  SX_KEY            Private key for transactions
+  BEE_API           Bee node URL for downloading
+
+EXAMPLES:
+  # Purchase escrow and save to default file
+  ade buy 42 --yes
+
+  # Specify output file
+  ade buy 42 --output ./purchased_data.csv --yes
+
+  # Custom timeout for key reveal (1 hour)
+  ade buy 42 --wait-timeout 3600
+
+OUTPUT:
+  Returns fund transaction hash, output file path, and verification status.
+
+NOTE:
+  The command will wait for the seller to reveal the key. If the seller
+  doesn't reveal within the timeout, you can retry later or raise a dispute.`)
+}
+
+function showRespondHelp(): void {
+  console.log(`ade respond - Respond to a bounty with deliverable
+
+USAGE:
+  ade respond <bounty-id> --file <path> [options]
+
+DESCRIPTION:
+  Respond to a bounty by creating an escrow with your deliverable:
+  1. Fetches bounty details (reward, requirements, creator)
+  2. Displays bounty info and confirms response
+  3. Encrypts, uploads, and creates escrow (like 'ade create')
+  4. Links escrow to bounty via API
+
+ARGUMENTS:
+  <bounty-id>        The bounty ID to respond to (required)
+
+REQUIRED:
+  --file <path>      File to deliver (max 50MB)
+
+OPTIONS:
+  --message <text>   Optional message to bounty creator
+  --yes              Skip confirmation prompt
+
+REQUIRED SECRETS (set via 'ade set'):
+  SX_KEY            Private key for transactions
+  BEE_API           Bee node URL
+  BEE_STAMP         Postage batch ID
+
+EXAMPLES:
+  # Respond to bounty with solution file
+  ade respond abc123 --file ./solution.zip --yes
+
+  # Include a message for the creator
+  ade respond abc123 --file ./analysis.csv --message "Here's the data analysis"
+
+OUTPUT:
+  Returns escrow ID, bounty details, and link confirmation.
+  The bounty creator can then fund your escrow to purchase the deliverable.
+
+WORKFLOW:
+  1. Bounty creator posts bounty: ade bounties create --title "..." --reward 0.5
+  2. You respond: ade respond <bounty-id> --file ./solution.zip
+  3. Creator purchases: ade buy <escrow-id>
+  4. You reveal key: ade escrows reveal-key <escrow-id>
+  5. You claim payment: ade escrows claim <escrow-id>`)
 }
 
 export function showActionHelp(resource: string, action: string): void {
@@ -124,6 +306,7 @@ function getActionDescription(resource: Resource, action: string): string {
     'commit-key': 'Commit encryption key release',
     'reveal-key': 'Reveal encryption key to buyer',
     'claim': 'Claim payment after dispute window',
+    'status': 'Check escrow state and local keys',
   }
   return descriptions[action] || action
 }
@@ -397,6 +580,38 @@ Note:
 
 Examples:
   ade escrows claim 42 --yes`
+
+    case 'escrows status':
+      return `ade escrows status - Check escrow state and local keys
+
+Usage:
+  ade escrows status <id>
+
+Arguments:
+  <id>    Escrow ID (required)
+
+Description:
+  Shows comprehensive status of an escrow including:
+  - On-chain state (Created, Funded, KeyCommitted, Released, Claimed, etc.)
+  - Whether local keys are stored in keychain
+  - Seller/buyer addresses
+  - Price and expiration
+  - Content hash
+
+Output:
+  {
+    "escrowId": 42,
+    "state": "Funded",
+    "hasLocalKeys": true,
+    "hasSwarmRef": true,
+    "hasContentHash": true,
+    "onChain": { ... },
+    "local": { ... }
+  }
+
+Examples:
+  ade escrows status 42
+  ade escrows status 42 --format json`
 
     case 'wallets list':
       return `ade wallets list - List wallets with reputation

@@ -276,6 +276,13 @@ async function handleResource(
             yes: flags.yes === true,
           });
           break;
+        case "status":
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade escrows status <id>");
+            process.exit(1);
+          }
+          result = await commands.escrowsStatus(cmdArgs[0]);
+          break;
         default:
           console.error(`Unknown action: escrows ${action}`);
           process.exit(1);
@@ -318,6 +325,8 @@ async function handleResource(
 
 async function handleMeta(
   command: string,
+  cmdArgs: string[],
+  flags: Record<string, string | boolean>,
   format: "json" | "human"
 ): Promise<void> {
   switch (command) {
@@ -335,6 +344,53 @@ async function handleMeta(
     case "update":
       await update();
       break;
+    case "create": {
+      // Unified escrow creation command
+      if (!flags.file || !flags.price) {
+        console.error("Usage: ade create --file <path> --price <eth> [--title <text>] [--description <text>] [--dry-run] [--yes]");
+        process.exit(1);
+      }
+      const result = await commands.create({
+        file: flags.file as string,
+        price: flags.price as string,
+        title: flags.title as string,
+        description: flags.description as string,
+        yes: flags.yes === true,
+        dryRun: flags["dry-run"] === true,
+      });
+      output(result, format);
+      break;
+    }
+    case "buy": {
+      // Complete buyer flow
+      if (!cmdArgs[0]) {
+        console.error("Usage: ade buy <escrow-id> [--output <path>] [--wait-timeout <seconds>] [--yes]");
+        process.exit(1);
+      }
+      const result = await commands.buy({
+        escrowId: cmdArgs[0],
+        output: flags.output as string,
+        waitTimeout: flags["wait-timeout"] ? parseInt(flags["wait-timeout"] as string, 10) : undefined,
+        yes: flags.yes === true,
+      });
+      output(result, format);
+      break;
+    }
+    case "respond": {
+      // Bounty response flow
+      if (!cmdArgs[0] || !flags.file) {
+        console.error("Usage: ade respond <bounty-id> --file <path> [--message <text>] [--yes]");
+        process.exit(1);
+      }
+      const result = await commands.respond({
+        bountyId: cmdArgs[0],
+        file: flags.file as string,
+        message: flags.message as string,
+        yes: flags.yes === true,
+      });
+      output(result, format);
+      break;
+    }
     default:
       console.error(`Unknown command: ${command}`);
       process.exit(1);
@@ -365,7 +421,7 @@ async function main() {
         break;
 
       case "meta":
-        await handleMeta(parsed.command, format);
+        await handleMeta(parsed.command, parsed.args, parsed.flags, format);
         break;
 
       case "help":
