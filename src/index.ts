@@ -1,9 +1,14 @@
 import { setSecret, getSecret, removeSecret, listSecrets } from "./secrets";
 import { update, getVersion } from "./update";
+import { parseArgs } from "./routing";
+import { showHelp, showResourceHelp, showActionHelp } from "./help";
+import { detectFormat, output } from "./format";
+import { CLIError } from "./errors";
+import { SCHEMA } from "./schema";
+import * as commands from "./commands";
 
 const args = process.argv.slice(2);
-const command = args[0];
-const key = args[1];
+const parsed = parseArgs(args);
 
 async function promptSecret(): Promise<string> {
   process.stdout.write("Enter secret: ");
@@ -30,7 +35,9 @@ async function promptSecret(): Promise<string> {
   return value;
 }
 
-async function main() {
+async function handleSecrets(command: string, cmdArgs: string[]): Promise<void> {
+  const key = cmdArgs[0];
+
   switch (command) {
     case "set": {
       if (!key) {
@@ -84,28 +91,308 @@ async function main() {
       }
       break;
     }
+  }
+}
 
-    case "update":
-      await update();
+async function handleResource(
+  resource: string,
+  action: string,
+  cmdArgs: string[],
+  flags: Record<string, string | boolean>,
+  format: "json" | "human"
+): Promise<void> {
+  let result: unknown;
+
+  switch (resource) {
+    case "skills":
+      switch (action) {
+        case "list":
+          result = await commands.skillsList({
+            category: flags.category as string,
+            status: flags.status as string,
+            limit: flags.limit as string,
+            offset: flags.offset as string,
+          });
+          break;
+        case "show":
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade skills show <id>");
+            process.exit(1);
+          }
+          result = await commands.skillsShow(cmdArgs[0]);
+          break;
+        case "vote":
+          if (!cmdArgs[0] || !cmdArgs[1]) {
+            console.error("Usage: ade skills vote <id> <up|down>");
+            process.exit(1);
+          }
+          result = await commands.skillsVote(cmdArgs[0], cmdArgs[1]);
+          break;
+        case "comment":
+          if (!cmdArgs[0] || !cmdArgs[1]) {
+            console.error("Usage: ade skills comment <id> <body>");
+            process.exit(1);
+          }
+          result = await commands.skillsComment(cmdArgs[0], cmdArgs[1]);
+          break;
+        case "create":
+          if (!flags.title || !flags.price) {
+            console.error("Usage: ade skills create --title <s> --price <n>");
+            process.exit(1);
+          }
+          result = await commands.skillsCreate({
+            title: flags.title as string,
+            price: flags.price as string,
+            description: flags.description as string,
+            category: flags.category as string,
+          });
+          break;
+        default:
+          console.error(`Unknown action: skills ${action}`);
+          process.exit(1);
+      }
       break;
 
-    case "version":
-    case "--version":
-    case "-v":
-      console.log(getVersion());
+    case "bounties":
+      switch (action) {
+        case "list":
+          result = await commands.bountiesList({
+            status: flags.status as string,
+            limit: flags.limit as string,
+            offset: flags.offset as string,
+          });
+          break;
+        case "show":
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade bounties show <id>");
+            process.exit(1);
+          }
+          result = await commands.bountiesShow(cmdArgs[0]);
+          break;
+        case "create":
+          if (!flags.title || !flags.reward) {
+            console.error("Usage: ade bounties create --title <s> --reward <n>");
+            process.exit(1);
+          }
+          result = await commands.bountiesCreate({
+            title: flags.title as string,
+            reward: flags.reward as string,
+            description: flags.description as string,
+            category: flags.category as string,
+          });
+          break;
+        default:
+          console.error(`Unknown action: bounties ${action}`);
+          process.exit(1);
+      }
+      break;
+
+    case "agents":
+      switch (action) {
+        case "list":
+          result = await commands.agentsList({
+            sort: flags.sort as string,
+            limit: flags.limit as string,
+            offset: flags.offset as string,
+          });
+          break;
+        case "show":
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade agents show <id>");
+            process.exit(1);
+          }
+          result = await commands.agentsShow(cmdArgs[0]);
+          break;
+        default:
+          console.error(`Unknown action: agents ${action}`);
+          process.exit(1);
+      }
+      break;
+
+    case "escrows":
+      switch (action) {
+        case "list":
+          result = await commands.escrowsList({
+            state: flags.state as string,
+            limit: flags.limit as string,
+            offset: flags.offset as string,
+          });
+          break;
+        case "show":
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade escrows show <id>");
+            process.exit(1);
+          }
+          result = await commands.escrowsShow(cmdArgs[0]);
+          break;
+        case "create":
+          if (!flags["content-hash"] || !flags.price) {
+            console.error("Usage: ade escrows create --content-hash <0x...> --price <n> [--yes]");
+            process.exit(1);
+          }
+          result = await commands.escrowsCreate({
+            contentHash: flags["content-hash"] as string,
+            price: flags.price as string,
+            yes: flags.yes === true,
+          });
+          break;
+        case "fund":
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade escrows fund <id> [--yes]");
+            process.exit(1);
+          }
+          result = await commands.escrowsFund(cmdArgs[0], {
+            yes: flags.yes === true,
+          });
+          break;
+        case "commit-key":
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade escrows commit-key <id> [--yes]");
+            process.exit(1);
+          }
+          result = await commands.escrowsCommitKey(cmdArgs[0], {
+            key: flags.key as string,
+            salt: flags.salt as string,
+            yes: flags.yes === true,
+          });
+          break;
+        case "reveal-key":
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade escrows reveal-key <id> [--yes]");
+            process.exit(1);
+          }
+          result = await commands.escrowsRevealKey(cmdArgs[0], {
+            key: flags.key as string,
+            salt: flags.salt as string,
+            yes: flags.yes === true,
+          });
+          break;
+        case "claim":
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade escrows claim <id> [--yes]");
+            process.exit(1);
+          }
+          result = await commands.escrowsClaim(cmdArgs[0], {
+            yes: flags.yes === true,
+          });
+          break;
+        default:
+          console.error(`Unknown action: escrows ${action}`);
+          process.exit(1);
+      }
+      break;
+
+    case "wallets":
+      switch (action) {
+        case "list":
+          result = await commands.walletsList({
+            role: flags.role as string,
+            limit: flags.limit as string,
+            offset: flags.offset as string,
+          });
+          break;
+        default:
+          console.error(`Unknown action: wallets ${action}`);
+          process.exit(1);
+      }
+      break;
+
+    case "config":
+      switch (action) {
+        case "show":
+          result = await commands.configShow();
+          break;
+        default:
+          console.error(`Unknown action: config ${action}`);
+          process.exit(1);
+      }
       break;
 
     default:
-      console.log(`ade - Secret Vault CLI
+      console.error(`Unknown resource: ${resource}`);
+      process.exit(1);
+  }
 
-Usage:
-  ade set <key>     Store a secret (prompts for value)
-  ade get <key>     Retrieve a secret
-  ade rm <key>      Remove a secret
-  ade ls            List all secret keys
-  ade update        Update to latest version
-  ade version       Show version`);
-      if (command) process.exit(1);
+  output(result, format);
+}
+
+async function handleMeta(
+  command: string,
+  format: "json" | "human"
+): Promise<void> {
+  switch (command) {
+    case "stats": {
+      const result = await commands.statsFn();
+      output(result, format);
+      break;
+    }
+    case "schema":
+      output(SCHEMA, format);
+      break;
+    case "version":
+      console.log(getVersion());
+      break;
+    case "update":
+      await update();
+      break;
+    default:
+      console.error(`Unknown command: ${command}`);
+      process.exit(1);
+  }
+}
+
+async function main() {
+  const format = detectFormat(
+    parsed.type === "resource" || parsed.type === "meta"
+      ? (parsed.flags?.format as string)
+      : undefined
+  );
+
+  try {
+    switch (parsed.type) {
+      case "secrets":
+        await handleSecrets(parsed.command, parsed.args);
+        break;
+
+      case "resource":
+        await handleResource(
+          parsed.resource,
+          parsed.action,
+          parsed.args,
+          parsed.flags,
+          format
+        );
+        break;
+
+      case "meta":
+        await handleMeta(parsed.command, format);
+        break;
+
+      case "help":
+        if (parsed.subtopic) {
+          showActionHelp(parsed.topic!, parsed.subtopic);
+        } else if (parsed.topic) {
+          showResourceHelp(parsed.topic);
+        } else {
+          showHelp();
+        }
+        break;
+
+      case "unknown":
+        console.error(`Unknown command: ${parsed.command}`);
+        console.error("Run 'ade help' for available commands.");
+        process.exit(1);
+    }
+  } catch (err) {
+    if (err instanceof CLIError) {
+      if (format === "json") {
+        console.log(JSON.stringify(err.toJSON(), null, 2));
+      } else {
+        console.error(err.toHuman());
+      }
+      process.exit(err.exitCode);
+    }
+    throw err;
   }
 }
 
