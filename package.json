@@ -5,8 +5,10 @@
   "scripts": {
     "test": "bun test",
     "test:watch": "bun test --watch",
-    "test:unit": "bun test --test-name-pattern '(mock|secrets|update)'",
+    "test:unit": "bun test tests/errors.test.ts tests/format.test.ts tests/api.test.ts tests/routing.test.ts tests/help.test.ts tests/escrow-keys.test.ts tests/commands.test.ts tests/addresses.test.ts tests/secrets.test.ts tests/keychain/keychain.test.ts tests/update.test.ts tests/integration.test.ts",
+    "test:chain": "bun test tests/chain-view.test.ts",
     "test:integration": "bun test tests/keychain/integration.test.ts",
+    "review": "bun scripts/review.ts",
     "dev": "bun run src/index.ts",
     "build": "bun build src/index.ts --compile --outfile ade",
     "build:all": "bun run build:darwin-arm64 && bun run build:darwin-x64 && bun run build:linux-x64 && bun run build:windows-x64",

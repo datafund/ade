@@ -158,6 +158,69 @@ describe("commands", () => {
       });
     });
 
+    describe("escrowsShow", () => {
+      it("should fetch escrow by ID", async () => {
+        setupFetchResponse({ id: "123", state: "funded", amount: "1000000000000000000" });
+
+        const result = await commands.escrowsShow("123");
+
+        const [url] = mockFetch.mock.calls[0] as [string];
+        expect(url).toContain("/escrows/123");
+        expect(result).toEqual({ id: "123", state: "funded", amount: "1000000000000000000" });
+      });
+
+      it("should URL-encode escrow ID", async () => {
+        setupFetchResponse({});
+
+        await commands.escrowsShow("escrow/special");
+
+        const [url] = mockFetch.mock.calls[0] as [string];
+        expect(url).toContain("/escrows/escrow%2Fspecial");
+      });
+    });
+
+    describe("bountiesShow", () => {
+      it("should fetch bounty by ID", async () => {
+        setupFetchResponse({ id: "bounty-1", title: "Fix Bug", reward: "0.5" });
+
+        const result = await commands.bountiesShow("bounty-1");
+
+        const [url] = mockFetch.mock.calls[0] as [string];
+        expect(url).toContain("/bounties/bounty-1");
+        expect(result).toEqual({ id: "bounty-1", title: "Fix Bug", reward: "0.5" });
+      });
+
+      it("should URL-encode bounty ID", async () => {
+        setupFetchResponse({});
+
+        await commands.bountiesShow("bounty with spaces");
+
+        const [url] = mockFetch.mock.calls[0] as [string];
+        expect(url).toContain("/bounties/bounty%20with%20spaces");
+      });
+    });
+
+    describe("agentsShow", () => {
+      it("should fetch agent reputation by ID", async () => {
+        setupFetchResponse({ id: "agent-1", reputation: 95, totalJobs: 50 });
+
+        const result = await commands.agentsShow("agent-1");
+
+        const [url] = mockFetch.mock.calls[0] as [string];
+        expect(url).toContain("/agents/agent-1/reputation");
+        expect(result).toEqual({ id: "agent-1", reputation: 95, totalJobs: 50 });
+      });
+
+      it("should URL-encode agent ID", async () => {
+        setupFetchResponse({});
+
+        await commands.agentsShow("agent/special");
+
+        const [url] = mockFetch.mock.calls[0] as [string];
+        expect(url).toContain("/agents/agent%2Fspecial/reputation");
+      });
+    });
+
     describe("walletsList", () => {
       it("should fetch wallets with role filter", async () => {
         setupFetchResponse({ wallets: [{ address: "0x123" }] });
@@ -263,6 +326,158 @@ describe("commands", () => {
         expect(body.title).toBe("Fix Bug");
         expect(body.rewardAmount).toBe("0.5");
       });
+    });
+  });
+
+  describe("chain commands (validation)", () => {
+    let commands: typeof import("../src/commands");
+
+    beforeEach(async () => {
+      commands = await import("../src/commands");
+    });
+
+    describe("escrowsCreate", () => {
+      it("should require SX_KEY", async () => {
+        try {
+          await commands.escrowsCreate({ contentHash: "0x" + "a".repeat(64), price: "0.1", yes: true }, mockKeychain);
+          expect.unreachable("should have thrown");
+        } catch (err: unknown) {
+          expect((err as Error).message).toContain("SX_KEY");
+        }
+      });
+
+      // Note: Content hash validation happens after RPC connection in the current implementation
+      // These tests would require mocking viem's createPublicClient which is complex
+    });
+
+    describe("escrowsFund", () => {
+      it("should require SX_KEY", async () => {
+        try {
+          await commands.escrowsFund("1", { yes: true }, mockKeychain);
+          expect.unreachable("should have thrown");
+        } catch (err: unknown) {
+          expect((err as Error).message).toContain("SX_KEY");
+        }
+      });
+
+      // Note: Escrow ID validation happens after RPC connection
+    });
+
+    describe("escrowsCommitKey", () => {
+      it("should require SX_KEY", async () => {
+        try {
+          await commands.escrowsCommitKey("1", { yes: true }, mockKeychain);
+          expect.unreachable("should have thrown");
+        } catch (err: unknown) {
+          expect((err as Error).message).toContain("SX_KEY");
+        }
+      });
+
+      // Note: Key/salt validation happens after RPC connection
+    });
+
+    describe("escrowsRevealKey", () => {
+      it("should require SX_KEY", async () => {
+        try {
+          await commands.escrowsRevealKey("1", { yes: true }, mockKeychain);
+          expect.unreachable("should have thrown");
+        } catch (err: unknown) {
+          expect((err as Error).message).toContain("SX_KEY");
+        }
+      });
+    });
+
+    describe("escrowsClaim", () => {
+      it("should require SX_KEY", async () => {
+        try {
+          await commands.escrowsClaim("1", { yes: true }, mockKeychain);
+          expect.unreachable("should have thrown");
+        } catch (err: unknown) {
+          expect((err as Error).message).toContain("SX_KEY");
+        }
+      });
+    });
+  });
+
+  describe("private key validation", () => {
+    let commands: typeof import("../src/commands");
+
+    beforeEach(async () => {
+      commands = await import("../src/commands");
+    });
+
+    it("should accept key with 0x prefix", async () => {
+      const testKey = "0x1234567890123456789012345678901234567890123456789012345678901234";
+      await mockKeychain.set("SX_KEY", testKey);
+      setupFetchResponse({ success: true });
+
+      // This should not throw for key format
+      await commands.skillsVote("skill-1", "up", mockKeychain);
+      expect(mockFetch).toHaveBeenCalled();
+    });
+
+    it("should accept key without 0x prefix", async () => {
+      const testKey = "1234567890123456789012345678901234567890123456789012345678901234";
+      await mockKeychain.set("SX_KEY", testKey);
+      setupFetchResponse({ success: true });
+
+      // This should not throw for key format
+      await commands.skillsVote("skill-1", "up", mockKeychain);
+      expect(mockFetch).toHaveBeenCalled();
+    });
+
+    it("should accept uppercase key", async () => {
+      const testKey = "0xABCDEF0123456789012345678901234567890123456789012345678901234567";
+      await mockKeychain.set("SX_KEY", testKey);
+      setupFetchResponse({ success: true });
+
+      await commands.skillsVote("skill-1", "up", mockKeychain);
+      expect(mockFetch).toHaveBeenCalled();
+    });
+
+    it("should reject key that is too short", async () => {
+      const shortKey = "0x1234";
+      await mockKeychain.set("SX_KEY", shortKey);
+
+      try {
+        await commands.skillsVote("skill-1", "up", mockKeychain);
+        expect.unreachable("should have thrown");
+      } catch (err: unknown) {
+        expect((err as Error).message).toContain("32 bytes");
+      }
+    });
+
+    it("should reject key that is too long", async () => {
+      const longKey = "0x" + "1".repeat(70);
+      await mockKeychain.set("SX_KEY", longKey);
+
+      try {
+        await commands.skillsVote("skill-1", "up", mockKeychain);
+        expect.unreachable("should have thrown");
+      } catch (err: unknown) {
+        expect((err as Error).message).toContain("32 bytes");
+      }
+    });
+
+    it("should reject key with invalid characters", async () => {
+      const invalidKey = "0xGGGG567890123456789012345678901234567890123456789012345678901234";
+      await mockKeychain.set("SX_KEY", invalidKey);
+
+      try {
+        await commands.skillsVote("skill-1", "up", mockKeychain);
+        expect.unreachable("should have thrown");
+      } catch (err: unknown) {
+        expect((err as Error).message).toContain("32 bytes");
+      }
+    });
+
+    it("should trim whitespace from key", async () => {
+      const keyWithWhitespace = "  0x1234567890123456789012345678901234567890123456789012345678901234  ";
+      await mockKeychain.set("SX_KEY", keyWithWhitespace);
+      setupFetchResponse({ success: true });
+
+      await commands.skillsVote("skill-1", "up", mockKeychain);
+      expect(mockFetch).toHaveBeenCalled();
     });
   });
 
