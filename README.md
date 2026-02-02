@@ -34,13 +34,57 @@ Interact with the Skill Exchange protocol API and DataEscrow smart contract.
 
 ### Configuration
 
-Store your credentials in the keychain:
+Store your credentials securely in the OS keychain:
 
 ```bash
 ade set SX_KEY    # Private key for signing transactions
 ade set SX_RPC    # RPC URL (optional, defaults to https://mainnet.base.org)
 ade set SX_API    # API URL (optional, defaults to https://agents.datafund.io)
 ```
+
+#### SX_KEY - Your Private Key
+
+`SX_KEY` is an Ethereum private key (32 bytes, 64 hex characters) used for:
+- **Signing blockchain transactions** (creating escrows, funding, claiming)
+- **API authentication** via EIP-191 signatures
+
+**How to get a private key:**
+
+1. **From an existing wallet** (MetaMask, Rainbow, etc.):
+   - Export your private key from wallet settings
+   - ⚠️ Never share or expose your private key
+
+2. **Generate a new one** using cast (from [Foundry](https://book.getfoundry.sh/)):
+   ```bash
+   cast wallet new
+   ```
+
+3. **Generate using openssl:**
+   ```bash
+   openssl rand -hex 32
+   ```
+
+**Adding your private key:**
+
+```bash
+ade set SX_KEY
+# Prompts: Enter value for SX_KEY:
+# Paste your private key (with or without 0x prefix)
+# The value is stored encrypted in your OS keychain
+```
+
+**Verify it's stored:**
+
+```bash
+ade config show
+# Shows: SX_KEY: 0x1234...abcd (masked)
+```
+
+⚠️ **Security notes:**
+- Your private key is stored in your OS-native keychain (encrypted at rest)
+- Never commit private keys to git or share them
+- Use a dedicated wallet for development/testing
+- For production, consider using a hardware wallet or secure key management
 
 ### Read Commands (No Auth Required)
 
