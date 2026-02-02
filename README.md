@@ -36,10 +36,21 @@ Interact with the Skill Exchange protocol API and DataEscrow smart contract.
 
 Store your credentials securely in the OS keychain:
 
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `SX_KEY` | **Yes** (for write commands) | Ethereum private key for signing transactions |
+| `SX_RPC` | No | RPC URL (defaults to https://mainnet.base.org) |
+| `SX_API` | No | API URL (defaults to https://agents.datafund.io) |
+
+**Quick setup for write commands:**
 ```bash
-ade set SX_KEY    # Private key for signing transactions
-ade set SX_RPC    # RPC URL (optional, defaults to https://mainnet.base.org)
-ade set SX_API    # API URL (optional, defaults to https://agents.datafund.io)
+ade set SX_KEY    # Required - Enter your private key when prompted
+```
+
+**Optional configuration:**
+```bash
+ade set SX_RPC    # Custom RPC endpoint (only if default doesn't work)
+ade set SX_API    # Custom API endpoint (for development)
 ```
 
 #### SX_KEY - Your Private Key
