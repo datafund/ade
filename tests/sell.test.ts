@@ -6,7 +6,7 @@ import * as mockKeychain from "./keychain/mock";
 // Store original fetch
 const originalFetch = globalThis.fetch;
 
-describe("create command", () => {
+describe("sell command", () => {
   let mockFetch: ReturnType<typeof mock>;
   const testDir = join(import.meta.dir, ".test-files");
   const testFile = join(testDir, "test-data.txt");
@@ -45,7 +45,7 @@ describe("create command", () => {
     it("should require BEE_API before Swarm operations", async () => {
       // BEE_API is checked after file encryption but before Swarm upload
       await expect(
-        commands.create(
+        commands.sell(
           { file: testFile, price: "0.1", yes: true },
           mockKeychain
         )
@@ -56,7 +56,7 @@ describe("create command", () => {
       await mockKeychain.set("BEE_API", "http://localhost:1633");
 
       await expect(
-        commands.create(
+        commands.sell(
           { file: testFile, price: "0.1", yes: true },
           mockKeychain
         )
@@ -68,7 +68,7 @@ describe("create command", () => {
       await mockKeychain.set("BEE_STAMP", "invalid");
 
       await expect(
-        commands.create(
+        commands.sell(
           { file: testFile, price: "0.1", yes: true },
           mockKeychain
         )
@@ -77,7 +77,7 @@ describe("create command", () => {
 
     it("should throw on file not found", async () => {
       await expect(
-        commands.create(
+        commands.sell(
           { file: "/nonexistent/path/file.txt", price: "0.1", yes: true },
           mockKeychain
         )
@@ -87,7 +87,7 @@ describe("create command", () => {
     it("should require --yes flag in non-TTY mode", async () => {
       // Without --yes flag in non-TTY (test environment)
       await expect(
-        commands.create(
+        commands.sell(
           { file: testFile, price: "0.1", yes: false },
           mockKeychain
         )
@@ -115,11 +115,16 @@ describe("create command", () => {
 
       // Should fail when trying to get chain client (requires SX_KEY)
       await expect(
-        commands.create(
+        commands.sell(
           { file: testFile, price: "0.1", yes: true },
           mockKeychain
         )
       ).rejects.toThrow(/SX_KEY/);
+    });
+
+    it("create should be an alias for sell", async () => {
+      const commands = await import("../src/commands");
+      expect(commands.create).toBe(commands.sell);
     });
   });
 
@@ -156,7 +161,7 @@ describe("create command", () => {
       // This will fail when it tries to connect to the chain, but that's OK
       // We're testing that it reads the file correctly
       try {
-        await commands.create(
+        await commands.sell(
           { file: testFile, price: "0.1", yes: true },
           mockKeychain
         );
