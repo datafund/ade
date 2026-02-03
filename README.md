@@ -53,9 +53,12 @@ Store your credentials securely in the OS keychain:
 |--------|----------|-------------|
 | `SX_KEY` | **Yes** (for write commands) | Ethereum private key for signing transactions |
 | `SX_RPC` | No | RPC URL (defaults to https://mainnet.base.org) |
-| `BEE_API` | **Yes** (for `ade sell`) | Bee node URL (e.g., http://localhost:1633) |
-| `BEE_STAMP` | **Yes** (for `ade sell`) | Postage batch ID (64 hex chars) |
+| `BEE_API` | No | Bee node URL (defaults to FDS gateway) |
+| `BEE_STAMP` | No | Postage batch ID (auto-created if using own Bee node) |
 | `SX_API` | No | API URL (defaults to https://agents.datafund.io) |
+
+**Note:** Both `ade sell` and `ade buy` default to the FDS public gateway when `BEE_API` is not set:
+`https://gateway.fairdatasociety.org` - No postage stamp required!
 
 **Quick setup for write commands:**
 ```bash
@@ -186,8 +189,12 @@ This automatically:
 **Required secrets for `ade sell`:**
 ```bash
 ade set SX_KEY                              # Private key (interactive prompt)
-ade set BEE_API http://localhost:1633       # Bee node URL
-ade set BEE_STAMP abc123...                 # Postage batch ID (64 hex chars)
+```
+
+**Optional (uses FDS gateway by default):**
+```bash
+ade set BEE_API http://localhost:1633       # Own Bee node (optional)
+ade set BEE_STAMP abc123...                 # Auto-created if using own node
 ```
 
 **Example output:**
@@ -229,7 +236,7 @@ This automatically:
 **Required secrets for `ade buy`:**
 ```bash
 ade set SX_KEY                              # Private key (interactive prompt)
-ade set BEE_API http://localhost:1633       # Bee node URL
+# BEE_API optional - defaults to FDS gateway
 ```
 
 ### Bounty Response Flow

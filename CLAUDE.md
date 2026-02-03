@@ -168,8 +168,8 @@ Tests in `tests/chain-view.test.ts` hit real RPCs and may fail due to rate limit
 |-----|---------|
 | `SX_KEY` | Ethereum private key for signing |
 | `SX_RPC` | RPC URL (default: mainnet.base.org) |
-| `BEE_API` | Bee node URL for Swarm |
-| `BEE_STAMP` | Postage batch ID (64 hex) |
+| `BEE_API` | Bee node URL (default: FDS gateway) |
+| `BEE_STAMP` | Postage batch ID (auto-created if using own node) |
 | `ESCROW_<id>_KEY` | Encryption key for escrow |
 | `ESCROW_<id>_SALT` | Salt for key commitment |
 | `ESCROW_<id>_SWARM` | Swarm reference |
@@ -185,7 +185,7 @@ Three methods for setting secrets (agent-friendly):
 ```bash
 # Method 1: Value as argument (best for automation)
 ade set SX_RPC https://sepolia.base.org
-ade set BEE_API http://localhost:1633
+ade set BEE_API http://localhost:1633   # Optional - uses FDS gateway by default
 
 # Method 2: Pipe from stdin
 echo "https://mainnet.base.org" | ade set SX_RPC
@@ -194,6 +194,9 @@ echo "https://mainnet.base.org" | ade set SX_RPC
 ade set SX_KEY
 # Enter secret: <hidden input>
 ```
+
+**Note:** `BEE_API` is optional. Both sell and buy commands use the FDS public gateway
+(`https://gateway.fairdatasociety.org`) by default. No postage stamp required!
 
 ### Changing Networks
 
