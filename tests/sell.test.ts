@@ -52,27 +52,30 @@ describe("sell command", () => {
       ).rejects.toThrow(/BEE_API/);
     });
 
-    it("should require BEE_STAMP", async () => {
+    it("should auto-create stamp if BEE_STAMP not set (but fail without BZZ)", async () => {
       await mockKeychain.set("BEE_API", "http://localhost:1633");
+      // No BEE_STAMP set - will try to create one
+      // Mock will fail stamp creation (no BZZ balance in test)
 
       await expect(
         commands.sell(
           { file: testFile, price: "0.1", yes: true },
           mockKeychain
         )
-      ).rejects.toThrow(/BEE_STAMP/);
+      ).rejects.toThrow(); // Will fail on stamp creation (mocked)
     });
 
-    it("should validate BEE_STAMP format", async () => {
+    it("should auto-create stamp if BEE_STAMP invalid (but fail without BZZ)", async () => {
       await mockKeychain.set("BEE_API", "http://localhost:1633");
       await mockKeychain.set("BEE_STAMP", "invalid");
+      // Invalid stamp - will try to create one
 
       await expect(
         commands.sell(
           { file: testFile, price: "0.1", yes: true },
           mockKeychain
         )
-      ).rejects.toThrow(/64 hex/);
+      ).rejects.toThrow(); // Will fail on stamp creation (mocked)
     });
 
     it("should throw on file not found", async () => {

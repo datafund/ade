@@ -195,6 +195,138 @@ export async function pingBeeNode(beeApi: string): Promise<boolean> {
   }
 }
 
+/**
+ * Create a new postage stamp.
+ *
+ * @param amount - Amount of BZZ in PLUR (smallest unit). Higher = longer TTL.
+ * @param depth - Batch depth (17-24). Higher = more storage capacity.
+ * @param config - Swarm configuration (only beeApi needed)
+ * @returns Batch ID of created stamp
+ */
+export async function createPostageStamp(
+  amount: string,
+  depth: number,
+  config: Pick<SwarmConfig, 'beeApi'>
+): Promise<string> {
+  const url = `${config.beeApi.replace(/\/$/, '')}/stamps/${amount}/${depth}`
+
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  }, 120_000) // 2 min timeout for stamp creation
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    if (response.status === 402) {
+      throw new CLIError('ERR_INSUFFICIENT_BALANCE', 'Insufficient BZZ balance to create stamp', 'Fund your Bee node wallet with BZZ')
+    }
+    throw new CLIError('ERR_API_ERROR', `Failed to create postage stamp: ${response.status} ${text}`)
+  }
+
+  const result = await response.json() as { batchID: string }
+
+  if (!result.batchID || !/^[0-9a-f]{64}$/i.test(result.batchID)) {
+    throw new CLIError('ERR_API_ERROR', 'Invalid batch ID returned from stamp creation')
+  }
+
+  return result.batchID.toLowerCase()
+}
+
+/**
+ * Wait for a postage stamp to become usable.
+ * Stamps need time to propagate through the network.
+ *
+ * @param batchId - 64-char hex postage batch ID
+ * @param config - Swarm configuration (only beeApi needed)
+ * @param timeoutMs - Maximum time to wait (default: 5 minutes)
+ * @param pollIntervalMs - Time between checks (default: 5 seconds)
+ * @returns Stamp information once usable
+ */
+export async function waitForStampUsable(
+  batchId: string,
+  config: Pick<SwarmConfig, 'beeApi'>,
+  timeoutMs: number = 300_000, // 5 minutes
+  pollIntervalMs: number = 5_000 // 5 seconds
+): Promise<StampInfo> {
+  const startTime = Date.now()
+  const url = `${config.beeApi.replace(/\/$/, '')}/stamps/${batchId.toLowerCase()}`
+
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      const response = await fetchWithTimeout(url, {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+      }, DEFAULT_TIMEOUT)
+
+      if (response.ok) {
+        const stamp = await response.json() as StampInfo
+        if (stamp.usable) {
+          return stamp
+        }
+        // Stamp exists but not yet usable, keep waiting
+      }
+    } catch {
+      // Ignore errors during polling, keep trying
+    }
+
+    await sleep(pollIntervalMs)
+  }
+
+  throw new CLIError(
+    'ERR_NETWORK_TIMEOUT',
+    `Postage stamp ${batchId.slice(0, 16)}... did not become usable within ${timeoutMs / 1000}s`,
+    'The stamp may still be propagating. Try again later.'
+  )
+}
+
+/**
+ * Get or create a usable postage stamp.
+ * If BEE_STAMP is set and valid, use it. Otherwise create a new one.
+ *
+ * @param existingBatchId - Existing batch ID to check (optional)
+ * @param config - Swarm configuration
+ * @param onProgress - Progress callback for UI updates
+ * @returns Usable batch ID
+ */
+export async function getOrCreateStamp(
+  existingBatchId: string | null,
+  config: Pick<SwarmConfig, 'beeApi'>,
+  onProgress?: (message: string) => void
+): Promise<string> {
+  const log = onProgress || console.error.bind(console)
+
+  // Try existing stamp first
+  if (existingBatchId && /^[0-9a-f]{64}$/i.test(existingBatchId)) {
+    try {
+      const stamp = await checkStampValid(existingBatchId, config)
+      if (stamp.usable) {
+        return existingBatchId
+      }
+    } catch {
+      log(`  Existing stamp not usable, creating new one...`)
+    }
+  }
+
+  // Create new stamp
+  // Default: depth 20 (~1GB capacity), amount for ~1 week TTL
+  const DEFAULT_DEPTH = 20
+  const DEFAULT_AMOUNT = '10000000' // 10M PLUR ≈ cheap stamp for testing
+
+  log(`Creating new postage stamp...`)
+  log(`  Depth: ${DEFAULT_DEPTH} (capacity: ~${Math.pow(2, DEFAULT_DEPTH - 12)}MB)`)
+
+  const batchId = await createPostageStamp(DEFAULT_AMOUNT, DEFAULT_DEPTH, config)
+  log(`  Batch ID: ${batchId.slice(0, 16)}...`)
+
+  log(`Waiting for stamp to become usable (this may take a few minutes)...`)
+  await waitForStampUsable(batchId, config)
+  log(`  Stamp is now usable`)
+
+  return batchId
+}
+
 // ── Helpers ──
 
 async function fetchWithTimeout(

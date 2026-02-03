@@ -188,27 +188,39 @@ export async function getEscrowFromChain(
 }
 
 /**
- * Require BEE API and stamp configuration.
+ * Require BEE API configuration (stamp optional).
  */
 export interface BeeConfig {
   beeApi: string
   beeStamp: string
 }
 
-export async function requireBeeConfig(keychain: Keychain): Promise<BeeConfig> {
+export async function requireBeeApi(keychain: Keychain): Promise<string> {
   const beeApi = await keychain.get('BEE_API') || process.env.BEE_API
-  const beeStamp = await keychain.get('BEE_STAMP') || process.env.BEE_STAMP
 
   if (!beeApi) {
-    throw new CLIError('ERR_MISSING_KEY', 'BEE_API not configured', 'Use: ade set BEE_API (e.g., http://localhost:1633)')
-  }
-  if (!beeStamp) {
-    throw new CLIError('ERR_MISSING_KEY', 'BEE_STAMP not configured', 'Use: ade set BEE_STAMP (64-char hex batch ID)')
+    throw new CLIError('ERR_MISSING_KEY', 'BEE_API not configured', 'Use: ade set BEE_API http://localhost:1633')
   }
 
-  // Validate stamp format
-  if (!/^[0-9a-f]{64}$/i.test(beeStamp)) {
-    throw new CLIError('ERR_INVALID_ARGUMENT', 'BEE_STAMP must be 64 hex characters')
+  return beeApi
+}
+
+export async function getBeeStamp(keychain: Keychain): Promise<string | null> {
+  const beeStamp = await keychain.get('BEE_STAMP') || process.env.BEE_STAMP || null
+
+  if (beeStamp && !/^[0-9a-f]{64}$/i.test(beeStamp)) {
+    return null // Invalid format, treat as not set
+  }
+
+  return beeStamp
+}
+
+export async function requireBeeConfig(keychain: Keychain): Promise<BeeConfig> {
+  const beeApi = await requireBeeApi(keychain)
+  const beeStamp = await getBeeStamp(keychain)
+
+  if (!beeStamp) {
+    throw new CLIError('ERR_MISSING_KEY', 'BEE_STAMP not configured', 'Use: ade set BEE_STAMP <64-char-hex>')
   }
 
   return { beeApi, beeStamp }

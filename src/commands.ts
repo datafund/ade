@@ -26,7 +26,7 @@ import {
   type KeyPair,
 } from './crypto/fairdrop'
 import { createKeystore, parseKeystore, validatePassword, type KeystorePayload } from './crypto/keystore'
-import { uploadToSwarm, checkStampValid, downloadFromSwarm } from './swarm'
+import { uploadToSwarm, checkStampValid, downloadFromSwarm, getOrCreateStamp } from './swarm'
 import { parseEscrowIdFromLogs, waitForKeyRevealed } from './utils/events'
 import {
   txLink,
@@ -35,6 +35,8 @@ import {
   estimateAndValidateGas,
   getAndValidateEscrowKeys,
   getEscrowFromChain,
+  requireBeeApi,
+  getBeeStamp,
   requireBeeConfig,
   logChainInfo,
   formatTxResult,
@@ -695,13 +697,21 @@ export async function sell(opts: SellOpts, keychain: Keychain = defaultKeychain)
   const contentHash = keccak256(encryptedData)
   console.error(`  Content hash: ${contentHash}`)
 
-  // 4. Get BEE_API and BEE_STAMP from keychain
-  const { beeApi, beeStamp } = await requireBeeConfig(keychain)
+  // 4. Get BEE_API and check/create stamp
+  const beeApi = await requireBeeApi(keychain)
+  const existingStamp = await getBeeStamp(keychain)
 
-  // 5. Check stamp validity
+  // 5. Get or create usable postage stamp
   console.error(`Checking postage stamp...`)
-  await checkStampValid(beeStamp, { beeApi })
-  console.error(`  Stamp valid`)
+  const beeStamp = await getOrCreateStamp(existingStamp, { beeApi }, (msg) => console.error(msg))
+
+  // Store stamp if newly created (different from existing)
+  if (beeStamp !== existingStamp) {
+    await keychain.set('BEE_STAMP', beeStamp)
+    console.error(`  Saved new stamp to keychain: BEE_STAMP`)
+  } else {
+    console.error(`  Stamp valid`)
+  }
 
   // 6. Get chain client for gas estimation (even in dry-run)
   const { pub, wallet, address, chainConfig } = await getChainClient(keychain)
