@@ -8,11 +8,14 @@ const DEFAULT_TIMEOUT = 60_000 // 60 seconds
 const MAX_RETRIES = 3
 const RETRY_DELAY = 1000 // 1 second
 
+/** FairDataSociety public Swarm gateway (read-only, no uploads) */
+export const SWARM_GATEWAY = 'https://gateway.fairdatasociety.org'
+
 export interface SwarmConfig {
   /** Bee API URL (e.g., http://localhost:1633) */
   beeApi: string
-  /** 64-char hex postage batch ID */
-  batchId: string
+  /** 64-char hex postage batch ID (optional when using public gateway) */
+  batchId?: string
 }
 
 export interface UploadResult {
@@ -46,12 +49,17 @@ export async function uploadToSwarm(
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
+      // Build headers - batchId optional for public gateways
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/octet-stream',
+      }
+      if (config.batchId) {
+        headers['swarm-postage-batch-id'] = config.batchId
+      }
+
       const response = await fetchWithTimeout(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          'swarm-postage-batch-id': config.batchId,
-        },
+        headers,
         body: data,
       }, DEFAULT_TIMEOUT)
 

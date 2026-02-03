@@ -26,7 +26,7 @@ import {
   type KeyPair,
 } from './crypto/fairdrop'
 import { createKeystore, parseKeystore, validatePassword, type KeystorePayload } from './crypto/keystore'
-import { uploadToSwarm, checkStampValid, downloadFromSwarm, getOrCreateStamp } from './swarm'
+import { uploadToSwarm, checkStampValid, downloadFromSwarm, getOrCreateStamp, SWARM_GATEWAY } from './swarm'
 import { parseEscrowIdFromLogs, waitForKeyRevealed } from './utils/events'
 import {
   txLink,
@@ -697,20 +697,29 @@ export async function sell(opts: SellOpts, keychain: Keychain = defaultKeychain)
   const contentHash = keccak256(encryptedData)
   console.error(`  Content hash: ${contentHash}`)
 
-  // 4. Get BEE_API and check/create stamp
-  const beeApi = await requireBeeApi(keychain)
-  const existingStamp = await getBeeStamp(keychain)
+  // 4. Get BEE_API (or use gateway) and check/create stamp
+  const configuredBeeApi = await keychain.get('BEE_API') || process.env.BEE_API
+  const usingGateway = !configuredBeeApi
+  const beeApi = configuredBeeApi || SWARM_GATEWAY
 
-  // 5. Get or create usable postage stamp
-  console.error(`Checking postage stamp...`)
-  const beeStamp = await getOrCreateStamp(existingStamp, { beeApi }, (msg) => console.error(msg))
+  let beeStamp: string | undefined
 
-  // Store stamp if newly created (different from existing)
-  if (beeStamp !== existingStamp) {
-    await keychain.set('BEE_STAMP', beeStamp)
-    console.error(`  Saved new stamp to keychain: BEE_STAMP`)
+  if (usingGateway) {
+    console.error(`Using FDS gateway: ${SWARM_GATEWAY}`)
+    console.error(`  No postage stamp required`)
   } else {
-    console.error(`  Stamp valid`)
+    // 5. Get or create usable postage stamp (only for own Bee node)
+    const existingStamp = await getBeeStamp(keychain)
+    console.error(`Checking postage stamp...`)
+    beeStamp = await getOrCreateStamp(existingStamp, { beeApi }, (msg) => console.error(msg))
+
+    // Store stamp if newly created (different from existing)
+    if (beeStamp !== existingStamp) {
+      await keychain.set('BEE_STAMP', beeStamp)
+      console.error(`  Saved new stamp to keychain: BEE_STAMP`)
+    } else {
+      console.error(`  Stamp valid`)
+    }
   }
 
   // 6. Get chain client for gas estimation (even in dry-run)
@@ -755,7 +764,7 @@ export async function sell(opts: SellOpts, keychain: Keychain = defaultKeychain)
   await confirmAction('Create escrow?', opts)
 
   // 7. Upload to Swarm (only after confirmation, not in dry-run)
-  console.error(`Uploading to Swarm...`)
+  console.error(`Uploading to Swarm${usingGateway ? ' via gateway' : ''}...`)
   const { reference: swarmRef } = await uploadToSwarm(encryptedData, { beeApi, batchId: beeStamp })
   console.error(`  Swarm reference: ${swarmRef}`)
 
@@ -1061,9 +1070,9 @@ export async function buy(opts: BuyOpts, keychain: Keychain = defaultKeychain): 
 
   // 6. Download encrypted data from Swarm
   console.error(`\nDownloading from Swarm...`)
-  const beeApi = await keychain.get('BEE_API') || process.env.BEE_API
-  if (!beeApi) {
-    throw new CLIError('ERR_MISSING_KEY', 'BEE_API not configured', 'Use: ade set BEE_API')
+  const beeApi = await keychain.get('BEE_API') || process.env.BEE_API || SWARM_GATEWAY
+  if (beeApi === SWARM_GATEWAY) {
+    console.error(`  Using FDS gateway: ${SWARM_GATEWAY}`)
   }
 
   const encryptedData = await downloadFromSwarm(swarmRef, { beeApi })

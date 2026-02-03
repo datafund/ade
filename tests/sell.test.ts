@@ -42,14 +42,15 @@ describe("sell command", () => {
       commands = await import("../src/commands");
     });
 
-    it("should require BEE_API before Swarm operations", async () => {
-      // BEE_API is checked after file encryption but before Swarm upload
+    it("should use gateway when BEE_API not set", async () => {
+      // When BEE_API is not set, should fall back to FDS gateway
+      // Will fail on SX_KEY check (after gateway is selected)
       await expect(
         commands.sell(
           { file: testFile, price: "0.1", yes: true },
           mockKeychain
         )
-      ).rejects.toThrow(/BEE_API/);
+      ).rejects.toThrow(/SX_KEY/);
     });
 
     it("should auto-create stamp if BEE_STAMP not set (but fail without BZZ)", async () => {
