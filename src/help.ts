@@ -2,7 +2,7 @@
  * Help system for CLI commands.
  */
 
-const RESOURCES = ['skills', 'bounties', 'agents', 'escrows', 'wallets', 'config'] as const
+const RESOURCES = ['skills', 'bounties', 'agents', 'escrows', 'wallets', 'config', 'account'] as const
 type Resource = typeof RESOURCES[number]
 
 const ACTIONS: Record<Resource, string[]> = {
@@ -12,6 +12,7 @@ const ACTIONS: Record<Resource, string[]> = {
   escrows: ['list', 'show', 'create', 'fund', 'commit-key', 'reveal-key', 'claim', 'status'],
   wallets: ['list'],
   config: ['show'],
+  account: ['create', 'unlock', 'lock', 'status', 'list', 'export', 'delete'],
 }
 
 export function showHelp(): void {
@@ -21,13 +22,13 @@ Usage:
   ade <command> [args] [options]
 
 Secret Management:
-  set <key>            Store a secret (prompts for value)
+  set <key> [value]    Store a secret (value as arg, stdin, or prompt)
   get <key>            Retrieve a secret
   rm <key>             Remove a secret
   ls                   List all secret keys
 
 Data Escrow (Seller Flow):
-  create               Create escrow from file (encrypt + upload + escrow)
+  sell                 Sell data via escrow (encrypt + upload + escrow)
   escrows              Manage data escrows
 
 Data Escrow (Buyer Flow):
@@ -35,6 +36,9 @@ Data Escrow (Buyer Flow):
 
 Bounty Response:
   respond <id>         Respond to bounty with deliverable
+
+Account Management:
+  account              Manage Fairdrop accounts for ECDH key exchange
 
 Skill Exchange:
   skills               Manage skill listings
@@ -55,8 +59,8 @@ Options:
   --help, -h           Show help for any command
 
 Examples:
-  # Seller: Create escrow from file
-  ade create --file data.csv --price 0.1 --yes
+  # Seller: Sell data via escrow
+  ade sell --file data.csv --price 0.1 --yes
 
   # Buyer: Purchase escrowed data
   ade buy 42 --output ./data.csv --yes
@@ -77,8 +81,8 @@ Configuration (stored via 'ade set'):
 
 export function showResourceHelp(resource: string): void {
   // Handle meta commands
-  if (resource === 'create') {
-    showCreateHelp()
+  if (resource === 'sell' || resource === 'create') {
+    showSellHelp()
     return
   }
   if (resource === 'buy') {
@@ -93,7 +97,7 @@ export function showResourceHelp(resource: string): void {
   if (!RESOURCES.includes(resource as Resource)) {
     console.log(`Unknown resource: ${resource}
 
-Available resources: ${RESOURCES.join(', ')}, create, buy, respond
+Available resources: ${RESOURCES.join(', ')}, sell, buy, respond
 
 Run 'ade help' for overview.`)
     return
@@ -117,11 +121,11 @@ For detailed help on an action:
   ade help ${resource} <action>`)
 }
 
-function showCreateHelp(): void {
-  console.log(`ade create - Create data escrow from file
+function showSellHelp(): void {
+  console.log(`ade sell - Sell data via escrow
 
 USAGE:
-  ade create --file <path> --price <eth> [options]
+  ade sell --file <path> --price <eth> [options]
 
 DESCRIPTION:
   The unified seller command that handles the complete escrow creation flow:
@@ -146,14 +150,14 @@ REQUIRED SECRETS (set via 'ade set'):
   BEE_STAMP         Postage batch ID (64 hex chars)
 
 EXAMPLES:
-  # Create escrow from CSV file
-  ade create --file ./data.csv --price 0.01
+  # Sell data from CSV file
+  ade sell --file ./data.csv --price 0.01
 
   # Dry run to validate without spending gas
-  ade create --file ./data.csv --price 0.1 --dry-run
+  ade sell --file ./data.csv --price 0.1 --dry-run
 
-  # Create with metadata and skip confirmation
-  ade create --file ./report.pdf --price 0.1 --title "Q4 Report" --yes
+  # Sell with metadata and skip confirmation
+  ade sell --file ./report.pdf --price 0.1 --title "Q4 Report" --yes
 
 OUTPUT:
   Returns escrow ID, transaction hash, Swarm reference, and encryption keys.
@@ -292,10 +296,25 @@ function getResourceDescription(resource: Resource): string {
     case 'escrows': return 'Manage data escrows'
     case 'wallets': return 'View wallets'
     case 'config': return 'View configuration'
+    case 'account': return 'Manage Fairdrop accounts for ECDH key exchange'
   }
 }
 
 function getActionDescription(resource: Resource, action: string): string {
+  // Account-specific descriptions
+  if (resource === 'account') {
+    const accountDescs: Record<string, string> = {
+      'create': 'Create a new Fairdrop account',
+      'unlock': 'Unlock account for use in session',
+      'lock': 'Lock the active account',
+      'status': 'Show active account status',
+      'list': 'List all stored accounts',
+      'export': 'Export account keystore for backup',
+      'delete': 'Delete an account permanently',
+    }
+    return accountDescs[action] || action
+  }
+
   const descriptions: Record<string, string> = {
     'list': 'List items with optional filters',
     'show': 'Show details for a specific item',
@@ -547,7 +566,16 @@ Arguments:
   <id>    Escrow ID (required)
 
 Options:
-  --yes   Skip confirmation prompt
+  --buyer-pubkey <hex>  Buyer's secp256k1 public key for ECDH encryption
+  --yes                 Skip confirmation prompt
+
+ECDH Key Exchange (Recommended):
+  If --buyer-pubkey is provided, the AES key will be encrypted using ECDH
+  so only the buyer can decrypt it. The buyer should share their public key:
+    Buyer runs: ade account status
+    Buyer shares publicKey with seller
+
+  Without --buyer-pubkey, the raw key is revealed on-chain (less secure).
 
 Authentication:
   Requires SX_KEY and SX_RPC in keychain
@@ -558,6 +586,10 @@ Key Retrieval:
     ESCROW_<id>_SALT  Salt for commitment
 
 Examples:
+  # With ECDH (recommended)
+  ade escrows reveal-key 42 --buyer-pubkey 0x02abc123... --yes
+
+  # Without ECDH (raw key on-chain)
   ade escrows reveal-key 42 --yes`
 
     case 'escrows claim':
@@ -636,6 +668,140 @@ Output:
   - Key status (masked)
   - Contract address
   - Chain ID`
+
+    case 'account create':
+      return `ade account create - Create a new Fairdrop account
+
+Usage:
+  ade account create <subdomain>
+
+Arguments:
+  <subdomain>    Unique name for your account (letters, numbers, hyphens, underscores)
+
+Description:
+  Creates a new secp256k1 keypair for ECDH key exchange and stores it encrypted
+  in the OS keychain. You'll be prompted to enter a password twice.
+
+  The keypair enables secure key exchange in escrow transactions:
+  - Sellers encrypt AES keys for specific buyers using ECDH
+  - Buyers decrypt with their private key
+  - Keys are never revealed publicly on-chain
+
+Examples:
+  ade account create alice
+  ade account create my-trading-account`
+
+    case 'account unlock':
+      return `ade account unlock - Unlock an account for use
+
+Usage:
+  ade account unlock <subdomain>
+
+Arguments:
+  <subdomain>    Name of the account to unlock
+
+Description:
+  Decrypts the account's keystore and loads it into the session.
+  You'll be prompted for your password.
+
+  While unlocked, the account is used for:
+  - Encrypting revealed keys for buyers (as seller)
+  - Decrypting received keys (as buyer)
+
+Examples:
+  ade account unlock alice`
+
+    case 'account lock':
+      return `ade account lock - Lock the active account
+
+Usage:
+  ade account lock
+
+Description:
+  Clears the unlocked account from memory, removing the private key
+  from the current session. Use this when done with sensitive operations.
+
+Examples:
+  ade account lock`
+
+    case 'account status':
+      return `ade account status - Show active account status
+
+Usage:
+  ade account status
+
+Output:
+  Shows whether an account is currently unlocked and its details:
+  - Subdomain name
+  - Public key (hex) - Share this with sellers for ECDH key exchange
+  - Ethereum-style address
+
+ECDH Key Exchange:
+  When buying data, share your public key with the seller so they can
+  encrypt the AES key specifically for you. This keeps the key private
+  on-chain (only you can decrypt it with your private key).
+
+  Workflow:
+    1. Buyer: ade account create mybuyeraccount
+    2. Buyer: ade account unlock mybuyeraccount
+    3. Buyer: ade account status  # Get your public key
+    4. Buyer: Share public key with seller (any channel)
+    5. Seller: ade escrows reveal-key <id> --buyer-pubkey <your-pubkey>
+    6. Buyer: ade buy <id>  # Decrypts with your private key
+
+Examples:
+  ade account status`
+
+    case 'account list':
+      return `ade account list - List all stored accounts
+
+Usage:
+  ade account list
+
+Output:
+  Lists all accounts stored in the keychain with their status:
+  - subdomain: The account name
+  - active: Whether this account is currently unlocked
+
+Examples:
+  ade account list`
+
+    case 'account export':
+      return `ade account export - Export account keystore for backup
+
+Usage:
+  ade account export <subdomain>
+
+Arguments:
+  <subdomain>    Name of the account to export
+
+Output:
+  Returns the encrypted keystore JSON. Save this securely as a backup.
+  The keystore is encrypted with your password and can be imported later.
+
+Examples:
+  ade account export alice > alice-backup.json
+  ade account export alice --format json`
+
+    case 'account delete':
+      return `ade account delete - Delete an account permanently
+
+Usage:
+  ade account delete <subdomain> --yes
+
+Arguments:
+  <subdomain>    Name of the account to delete
+
+Options:
+  --yes          Required confirmation flag
+
+WARNING:
+  This permanently deletes the account from your keychain.
+  Make sure you have a backup (ade account export) before deleting.
+  Lost private keys cannot be recovered.
+
+Examples:
+  ade account delete alice --yes`
 
     default:
       return `No detailed help available for: ade ${resource} ${action}`

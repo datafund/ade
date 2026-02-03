@@ -12,6 +12,15 @@ const parsed = parseArgs(args);
 
 async function promptSecret(): Promise<string> {
   process.stdout.write("Enter secret: ");
+  return promptHidden();
+}
+
+async function promptPassword(prompt: string): Promise<string> {
+  process.stderr.write(prompt);
+  return promptHidden();
+}
+
+async function promptHidden(): Promise<string> {
   const value = await new Promise<string>((resolve) => {
     let input = "";
     process.stdin.setRawMode?.(true);
@@ -41,10 +50,26 @@ async function handleSecrets(command: string, cmdArgs: string[]): Promise<void> 
   switch (command) {
     case "set": {
       if (!key) {
-        console.error("Usage: ade set <key>");
+        console.error("Usage: ade set <key> [value]");
         process.exit(1);
       }
-      const value = await promptSecret();
+      let value: string;
+      if (cmdArgs[1]) {
+        // Value provided as argument: ade set KEY value
+        value = cmdArgs.slice(1).join(" ");
+      } else if (!process.stdin.isTTY) {
+        // Value from stdin pipe: echo "value" | ade set KEY
+        value = await new Promise<string>((resolve) => {
+          let data = "";
+          process.stdin.setEncoding("utf8");
+          process.stdin.on("data", (chunk) => (data += chunk));
+          process.stdin.on("end", () => resolve(data.trim()));
+          process.stdin.resume();
+        });
+      } else {
+        // Interactive prompt (TTY, no value provided)
+        value = await promptSecret();
+      }
       const result = await setSecret(key, value);
       if (result.success) {
         console.log(`Secret "${key}" stored successfully.`);
@@ -258,12 +283,13 @@ async function handleResource(
           break;
         case "reveal-key":
           if (!cmdArgs[0]) {
-            console.error("Usage: ade escrows reveal-key <id> [--yes]");
+            console.error("Usage: ade escrows reveal-key <id> [--buyer-pubkey <hex>] [--yes]");
             process.exit(1);
           }
           result = await commands.escrowsRevealKey(cmdArgs[0], {
             key: flags.key as string,
             salt: flags.salt as string,
+            buyerPubkey: flags['buyer-pubkey'] as string,
             yes: flags.yes === true,
           });
           break;
@@ -315,6 +341,60 @@ async function handleResource(
       }
       break;
 
+    case "account":
+      switch (action) {
+        case "create": {
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade account create <subdomain>");
+            process.exit(1);
+          }
+          const password = await promptPassword("Enter password: ");
+          const confirmPassword = await promptPassword("Confirm password: ");
+          if (password !== confirmPassword) {
+            console.error("Passwords do not match");
+            process.exit(1);
+          }
+          result = await commands.accountCreate(cmdArgs[0], password);
+          break;
+        }
+        case "unlock": {
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade account unlock <subdomain>");
+            process.exit(1);
+          }
+          const password = await promptPassword("Enter password: ");
+          result = await commands.accountUnlock(cmdArgs[0], password);
+          break;
+        }
+        case "lock":
+          result = await commands.accountLock();
+          break;
+        case "status":
+          result = await commands.accountStatus(cmdArgs[0]);
+          break;
+        case "list":
+          result = await commands.accountList();
+          break;
+        case "export":
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade account export <subdomain>");
+            process.exit(1);
+          }
+          result = await commands.accountExport(cmdArgs[0]);
+          break;
+        case "delete":
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade account delete <subdomain> --yes");
+            process.exit(1);
+          }
+          result = await commands.accountDelete(cmdArgs[0], flags.yes === true);
+          break;
+        default:
+          console.error(`Unknown action: account ${action}`);
+          process.exit(1);
+      }
+      break;
+
     default:
       console.error(`Unknown resource: ${resource}`);
       process.exit(1);
@@ -344,13 +424,14 @@ async function handleMeta(
     case "update":
       await update();
       break;
+    case "sell":
     case "create": {
-      // Unified escrow creation command
+      // Unified escrow creation command ('create' is deprecated alias for 'sell')
       if (!flags.file || !flags.price) {
-        console.error("Usage: ade create --file <path> --price <eth> [--title <text>] [--description <text>] [--dry-run] [--yes]");
+        console.error("Usage: ade sell --file <path> --price <eth> [--title <text>] [--description <text>] [--dry-run] [--yes]");
         process.exit(1);
       }
-      const result = await commands.create({
+      const result = await commands.sell({
         file: flags.file as string,
         price: flags.price as string,
         title: flags.title as string,

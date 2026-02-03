@@ -28,7 +28,9 @@ src/
 ├── abi/              # Contract ABIs
 │   └── DataEscrow.ts
 ├── crypto/           # Encryption utilities
-│   └── escrow.ts     # AES-256-GCM encrypt/decrypt for escrow
+│   ├── escrow.ts     # AES-256-GCM encrypt/decrypt for escrow
+│   ├── fairdrop.ts   # ECDH key exchange for buyer-encrypted keys
+│   └── keystore.ts   # Fairdrop account keystore encryption
 └── utils/
     ├── events.ts     # Event parsing from transaction logs
     └── chain.ts      # Shared chain transaction helpers
@@ -53,7 +55,7 @@ Use `executeContractTx()` from `src/utils/chain.ts` for all contract writes:
 ```typescript
 const { hash, receipt } = await executeContractTx({
   wallet, pub,
-  address: chainConfig.escrowAddress,
+  address: chainConfig.contracts.dataEscrow,
   functionName: 'functionName',
   args: [arg1, arg2],
   chainConfig,
@@ -67,7 +69,7 @@ Use `estimateAndValidateGas()` which includes safety cap validation:
 ```typescript
 const { gasCost } = await estimateAndValidateGas({
   pub,
-  address: chainConfig.escrowAddress,
+  address: chainConfig.contracts.dataEscrow,
   functionName: 'functionName',
   args: [arg1, arg2],
   account: address,
@@ -108,7 +110,7 @@ await confirmAction('Confirm transaction?', opts)  // Interactive prompt
 
 ```bash
 bun test                           # Run all tests
-bun test tests/create.test.ts      # Run specific test file
+bun test tests/sell.test.ts        # Run specific test file
 bun test --watch                   # Watch mode
 ```
 
@@ -154,7 +156,7 @@ Tests in `tests/chain-view.test.ts` hit real RPCs and may fail due to rate limit
 
 ## Important Constants
 
-- `MAX_FILE_SIZE`: 50MB - File size limit for `ade create`
+- `MAX_FILE_SIZE`: 50MB - File size limit for `ade sell`
 - `GAS_SAFETY_CAP`: 0.01 ETH - Maximum gas cost before warning
 - `CHAIN_TIMEOUT_MS`: 60 seconds - Transaction confirmation timeout
 - `DEFAULT_KEY_WAIT_TIMEOUT`: 86400 seconds (24h) - Key reveal polling timeout
@@ -172,25 +174,72 @@ Tests in `tests/chain-view.test.ts` hit real RPCs and may fail due to rate limit
 | `ESCROW_<id>_SALT` | Salt for key commitment |
 | `ESCROW_<id>_SWARM` | Swarm reference |
 | `ESCROW_<id>_CONTENT_HASH` | Content hash for verification |
+| `FAIRDROP_ACCOUNTS` | JSON array of account subdomains |
+| `FAIRDROP_KEYSTORE_<sub>` | Encrypted keystore for account |
+| `FAIRDROP_ACTIVE` | Currently active account subdomain |
+
+### Setting Secrets
+
+Three methods for setting secrets (agent-friendly):
+
+```bash
+# Method 1: Value as argument (best for automation)
+ade set SX_RPC https://sepolia.base.org
+ade set BEE_API http://localhost:1633
+
+# Method 2: Pipe from stdin
+echo "https://mainnet.base.org" | ade set SX_RPC
+
+# Method 3: Interactive prompt (for sensitive values)
+ade set SX_KEY
+# Enter secret: <hidden input>
+```
+
+### Changing Networks
+
+The chain is auto-detected from the RPC URL's chainId response:
+
+```bash
+# Use Base Mainnet (default)
+ade set SX_RPC https://mainnet.base.org
+
+# Use Base Sepolia testnet
+ade set SX_RPC https://sepolia.base.org
+```
+
+Contracts are automatically selected based on chain (see `src/addresses.ts`).
 
 ## Main User Flows
 
 ### Seller Flow
 ```bash
-ade create --file ./data.csv --price 0.1 --yes  # Encrypt, upload, create escrow
-ade escrows commit-key 42 --yes                  # After buyer funds
-ade escrows reveal-key 42 --yes                  # Reveal key to buyer
-ade escrows claim 42 --yes                       # Claim payment after 24h
+ade sell --file ./data.csv --price 0.1 --yes  # Encrypt, upload, create escrow
+ade escrows commit-key 42 --yes                # After buyer funds
+ade escrows reveal-key 42 --yes                # Reveal key to buyer (ECDH-encrypted if buyer has account)
+ade escrows claim 42 --yes                     # Claim payment after 24h
 ```
 
 ### Buyer Flow
 ```bash
+ade account create buyer              # Create Fairdrop account (one-time)
+ade account unlock buyer              # Unlock for session
 ade buy 42 --output ./data.csv --yes  # Fund, wait for key, download, decrypt
 ```
 
 ### Bounty Response
 ```bash
 ade respond <bounty-id> --file ./solution.zip --yes  # Create escrow for bounty
+```
+
+### Account Management
+```bash
+ade account create <subdomain>  # Create keypair, encrypted with password
+ade account unlock <subdomain>  # Decrypt and load into session
+ade account lock                # Clear session
+ade account status              # Show active account
+ade account list                # List all accounts
+ade account export <subdomain>  # Export keystore backup
+ade account delete <subdomain>  # Delete account
 ```
 
 ## Code Style

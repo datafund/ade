@@ -17,10 +17,23 @@ mv ade /usr/local/bin/
 Store secrets securely in your OS-native keychain:
 
 ```bash
-ade set <key>     # Store a secret (prompts for value)
-ade get <key>     # Retrieve a secret
-ade rm <key>      # Remove a secret
-ade ls            # List all secret keys
+ade set <key> [value]   # Store a secret
+ade get <key>           # Retrieve a secret
+ade rm <key>            # Remove a secret
+ade ls                  # List all secret keys
+```
+
+**Setting secrets (3 methods):**
+```bash
+# Method 1: Value as argument (best for automation/agents)
+ade set SX_RPC https://sepolia.base.org
+
+# Method 2: Pipe from stdin
+echo "my-value" | ade set MY_KEY
+
+# Method 3: Interactive prompt (for sensitive values like private keys)
+ade set SX_KEY
+# Enter secret: <hidden input>
 ```
 
 Secrets are stored in:
@@ -40,19 +53,19 @@ Store your credentials securely in the OS keychain:
 |--------|----------|-------------|
 | `SX_KEY` | **Yes** (for write commands) | Ethereum private key for signing transactions |
 | `SX_RPC` | No | RPC URL (defaults to https://mainnet.base.org) |
-| `BEE_API` | **Yes** (for `ade create`) | Bee node URL (e.g., http://localhost:1633) |
-| `BEE_STAMP` | **Yes** (for `ade create`) | Postage batch ID (64 hex chars) |
+| `BEE_API` | **Yes** (for `ade sell`) | Bee node URL (e.g., http://localhost:1633) |
+| `BEE_STAMP` | **Yes** (for `ade sell`) | Postage batch ID (64 hex chars) |
 | `SX_API` | No | API URL (defaults to https://agents.datafund.io) |
 
 **Quick setup for write commands:**
 ```bash
-ade set SX_KEY    # Required - Enter your private key when prompted
+ade set SX_KEY                            # Interactive prompt (recommended for private keys)
 ```
 
 **Optional configuration:**
 ```bash
-ade set SX_RPC    # Custom RPC endpoint (only if default doesn't work)
-ade set SX_API    # Custom API endpoint (for development)
+ade set SX_RPC https://sepolia.base.org   # Use Base Sepolia testnet
+ade set SX_API https://api.example.com    # Custom API endpoint
 ```
 
 #### SX_KEY - Your Private Key
@@ -80,10 +93,12 @@ ade set SX_API    # Custom API endpoint (for development)
 **Adding your private key:**
 
 ```bash
+# Interactive (recommended - hides input):
 ade set SX_KEY
-# Prompts: Enter value for SX_KEY:
-# Paste your private key (with or without 0x prefix)
-# The value is stored encrypted in your OS keychain
+# Enter secret: <paste key, hidden>
+
+# Or via argument (use with caution - visible in shell history):
+ade set SX_KEY 0x1234...your_private_key
 ```
 
 **Verify it's stored:**
@@ -144,16 +159,16 @@ ade skills create --title "My Skill" --price 0.1 [--category <cat>] [--tags <tag
 ade bounties create --title "Fix Bug" --reward 0.5 [--description <desc>]
 ```
 
-### Unified Escrow Creation (Recommended)
+### Sell Data (Unified Escrow Creation)
 
-The `ade create` command handles the complete seller workflow in a single step:
+The `ade sell` command handles the complete seller workflow in a single step:
 
 ```bash
 # One command to encrypt, upload, and create escrow
-ade create --file ./data.csv --price 0.1 --yes
+ade sell --file ./data.csv --price 0.1 --yes
 
 # Dry run to validate without spending gas
-ade create --file ./data.csv --price 0.1 --dry-run
+ade sell --file ./data.csv --price 0.1 --dry-run
 ```
 
 This automatically:
@@ -168,11 +183,11 @@ This automatically:
 - `--dry-run` - Validate everything without executing transactions
 - `--yes` - Skip confirmation prompts
 
-**Required secrets for `ade create`:**
+**Required secrets for `ade sell`:**
 ```bash
-ade set SX_KEY      # Your private key for transactions
-ade set BEE_API     # Bee node URL (e.g., http://localhost:1633)
-ade set BEE_STAMP   # Postage batch ID (64 hex chars)
+ade set SX_KEY                              # Private key (interactive prompt)
+ade set BEE_API http://localhost:1633       # Bee node URL
+ade set BEE_STAMP abc123...                 # Postage batch ID (64 hex chars)
 ```
 
 **Example output:**
@@ -213,8 +228,8 @@ This automatically:
 
 **Required secrets for `ade buy`:**
 ```bash
-ade set SX_KEY      # Your private key for transactions
-ade set BEE_API     # Bee node URL for downloading
+ade set SX_KEY                              # Private key (interactive prompt)
+ade set BEE_API http://localhost:1633       # Bee node URL
 ```
 
 ### Bounty Response Flow
@@ -234,18 +249,63 @@ This automatically:
 2. Creates escrow using the bounty reward as price
 3. Links the escrow to the bounty via API
 
-**Required secrets:** Same as `ade create`
+**Required secrets:** Same as `ade sell`
+
+### Account Management (ECDH Key Exchange)
+
+The `ade account` commands manage Fairdrop accounts for secure ECDH key exchange:
+
+```bash
+# Create a new account (you'll be prompted for a password)
+ade account create alice
+
+# Unlock account for the current session
+ade account unlock alice
+
+# Check active account status
+ade account status
+
+# List all stored accounts
+ade account list
+
+# Lock account when done
+ade account lock
+
+# Export keystore for backup
+ade account export alice > alice-backup.json
+
+# Delete an account (WARNING: permanent!)
+ade account delete alice --yes
+```
+
+**Why use accounts?**
+- Sellers can encrypt revealed keys specifically for the buyer using ECDH
+- Buyers decrypt with their private key - keys are never exposed publicly on-chain
+- Provides forward secrecy through ephemeral keypairs
+
+**Workflow with ECDH:**
+1. Buyer creates and unlocks their account
+2. Buyer shares their public key with the seller (any channel - email, chat, etc.)
+3. Buyer funds the escrow: `ade buy <id>`
+4. Seller reveals key encrypted for buyer: `ade escrows reveal-key <id> --buyer-pubkey <pubkey>`
+5. Buyer decrypts with their private key automatically
+
+**Getting your public key:**
+```bash
+ade account status
+# Output includes: publicKey: 0x02abc123...
+```
 
 ### Complete Seller Flow
 
 ```bash
 # 1. Configure (one-time setup)
-ade set SX_KEY      # Your private key
-ade set BEE_API     # http://localhost:1633 (your Bee node)
-ade set BEE_STAMP   # Your postage batch ID
+ade set SX_KEY                              # Private key (interactive)
+ade set BEE_API http://localhost:1633       # Your Bee node
+ade set BEE_STAMP abc123...                 # Your postage batch ID
 
-# 2. Create escrow from file
-ade create --file ./data.pdf --price 0.1 --yes
+# 2. Sell data via escrow
+ade sell --file ./data.pdf --price 0.1 --yes
 # Outputs: escrowId, swarmRef, encryptionKey, etc.
 
 # 3. Share escrow ID with buyer
@@ -254,6 +314,11 @@ ade create --file ./data.pdf --price 0.1 --yes
 # 4. Release key (after buyer funds)
 ade escrows commit-key 42 --yes
 # Wait 2 blocks + 60 seconds...
+
+# Option A: With ECDH (recommended) - buyer shares their public key first
+ade escrows reveal-key 42 --buyer-pubkey 0x02abc... --yes
+
+# Option B: Without ECDH (raw key visible on-chain)
 ade escrows reveal-key 42 --yes
 
 # 5. Claim payment (after 24h dispute window)
