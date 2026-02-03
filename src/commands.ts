@@ -15,11 +15,21 @@ import { getChainConfig, CHAIN_BY_ID, DEFAULT_CHAIN, DEFAULT_RPC, type ChainConf
 import { encryptForEscrow, decryptFromEscrow } from './crypto/escrow'
 import { uploadToSwarm, checkStampValid, downloadFromSwarm } from './swarm'
 import { parseEscrowIdFromLogs, waitForKeyRevealed } from './utils/events'
+import {
+  txLink,
+  validateReceipt,
+  executeContractTx,
+  estimateAndValidateGas,
+  getAndValidateEscrowKeys,
+  getEscrowFromChain,
+  requireBeeConfig,
+  logChainInfo,
+  formatTxResult,
+  type TxResult,
+} from './utils/chain'
 import * as defaultKeychain from './keychain'
 import type { Keychain } from './secrets'
 
-const GAS_SAFETY_CAP = parseEther('0.01')
-const CHAIN_TIMEOUT_MS = 60_000
 const DEFAULT_EXPIRY_DAYS = 7n
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50MB
 const DEFAULT_KEY_WAIT_TIMEOUT = 86400 // 24 hours in seconds
@@ -169,13 +179,6 @@ function parseBigInt(value: string, label: string): bigint {
   }
 }
 
-/**
- * Format transaction link for explorer.
- */
-function txLink(hash: string, explorer: string): string {
-  return `${explorer}/tx/${hash}`
-}
-
 // ── Read Commands ──
 
 export async function statsFn() {
@@ -284,49 +287,30 @@ export async function escrowsCreate(opts: { contentHash: string; price: string; 
   const keyCommitment = keccak256(concat([encryptionKey, salt]))
   const nativeToken = '0x0000000000000000000000000000000000000000' as `0x${string}`
 
-  // Estimate gas with actual contract call
-  const gasEstimate = await pub.estimateContractGas({
+  // Estimate gas
+  const { gasCost } = await estimateAndValidateGas({
+    pub,
     address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
     functionName: 'createEscrow',
     args: [contentHash, keyCommitment, nativeToken, amount, DEFAULT_EXPIRY_DAYS],
     account: address,
-  }).catch((err) => {
-    throw new CLIError('ERR_API_ERROR', `Gas estimation failed: ${err.message}`, 'Check RPC connection and contract state')
   })
 
-  const gasPrice = await pub.getGasPrice().catch(() => {
-    throw new CLIError('ERR_API_ERROR', 'Could not fetch gas price', 'Check RPC connection')
-  })
-  const gasCost = gasEstimate * gasPrice
-
-  console.error(`Chain: ${chainConfig.name} (${chainConfig.chainId})`)
+  logChainInfo({ chainConfig, address })
   console.error(`Contract: ${chainConfig.escrowAddress}`)
   console.error(`Create escrow: ${opts.price} ETH`)
-  console.error(`From: ${address}`)
   console.error(`Estimated gas cost: ~${formatEther(gasCost)} ETH`)
-
-  if (gasCost > GAS_SAFETY_CAP) {
-    throw new CLIError('ERR_GAS_TOO_HIGH', `Gas cost ${formatEther(gasCost)} ETH exceeds safety cap of ${formatEther(GAS_SAFETY_CAP)} ETH`, 'Network may be congested, try again later')
-  }
 
   await confirmAction('Confirm transaction?', opts)
 
-  const hash = await wallet.writeContract({
+  const { hash, receipt } = await executeContractTx({
+    wallet, pub,
     address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
     functionName: 'createEscrow',
     args: [contentHash, keyCommitment, nativeToken, amount, DEFAULT_EXPIRY_DAYS],
+    chainConfig,
+    description: 'Create escrow',
   })
-
-  console.error(`Transaction: ${hash}`)
-  console.error(`Explorer: ${txLink(hash, chainConfig.explorer)}`)
-
-  const receipt = await pub.waitForTransactionReceipt({ hash, timeout: CHAIN_TIMEOUT_MS })
-
-  if (receipt.status === 'reverted') {
-    throw new CLIError('ERR_TX_REVERTED', 'Transaction reverted', 'Check contract state and parameters')
-  }
 
   // Parse escrow ID from logs using shared helper
   const escrowId = parseEscrowIdFromLogs(receipt.logs)
@@ -368,197 +352,120 @@ export async function escrowsCreate(opts: { contentHash: string; price: string; 
   }
 }
 
-export async function escrowsFund(id: string, opts: { yes?: boolean }, keychain: Keychain = defaultKeychain) {
+export async function escrowsFund(id: string, opts: { yes?: boolean }, keychain: Keychain = defaultKeychain): Promise<TxResult> {
   requireConfirmation(opts)
   const { pub, wallet, address, chainConfig } = await getChainClient(keychain)
   const escrowId = parseBigInt(id, 'escrow ID')
 
   // Read amount from on-chain contract (never trust off-chain API for tx params)
-  const escrowData = await pub.readContract({
-    address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
-    functionName: 'getEscrow',
-    args: [escrowId],
-  }).catch(() => null) as { amount?: bigint } | null
-
+  const escrowData = await getEscrowFromChain(pub, chainConfig.escrowAddress, escrowId)
   const amount = escrowData?.amount ?? 0n
   if (amount === 0n) {
     throw new CLIError('ERR_NOT_FOUND', `Escrow #${id} not found or has zero amount`)
   }
 
-  console.error(`Chain: ${chainConfig.name} (${chainConfig.chainId})`)
-  console.error(`Fund escrow #${id}: ${formatEther(amount)} ETH`)
-  console.error(`From: ${address}`)
-
+  logChainInfo({ chainConfig, address, action: 'Fund', escrowId: id, amount })
   await confirmAction('Confirm transaction?', opts)
 
-  const hash = await wallet.writeContract({
+  const { hash, receipt } = await executeContractTx({
+    wallet, pub,
     address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
     functionName: 'fundEscrow',
     args: [escrowId],
     value: amount,
+    chainConfig,
+    description: 'Fund escrow',
   })
 
-  console.error(`Transaction: ${hash}`)
-  console.error(`Explorer: ${txLink(hash, chainConfig.explorer)}`)
-
-  const receipt = await pub.waitForTransactionReceipt({ hash, timeout: CHAIN_TIMEOUT_MS })
-  if (receipt.status === 'reverted') throw new CLIError('ERR_TX_REVERTED', 'Transaction reverted')
-
-  return {
-    txHash: hash,
-    status: receipt.status,
-    blockNumber: Number(receipt.blockNumber),
-    chain: chainConfig.name,
-    explorer: txLink(hash, chainConfig.explorer),
-  }
+  return formatTxResult(hash, receipt, chainConfig)
 }
 
-export async function escrowsCommitKey(id: string, opts: { key?: string; salt?: string; yes?: boolean }, keychain: Keychain = defaultKeychain) {
+export async function escrowsCommitKey(id: string, opts: { key?: string; salt?: string; yes?: boolean }, keychain: Keychain = defaultKeychain): Promise<TxResult> {
   requireConfirmation(opts)
   const { pub, wallet, address, chainConfig } = await getChainClient(keychain)
   const escrowId = parseBigInt(id, 'escrow ID')
 
-  // Try to get key/salt from keychain first, then fall back to opts
-  let key = opts.key
-  let salt = opts.salt
-
-  if (!key || !salt) {
-    const stored = await getEscrowKeys(parseInt(id, 10), keychain)
-    if (stored) {
-      key = key || stored.encryptionKey
-      salt = salt || stored.salt
-      console.error(`Using keys from keychain for escrow #${id}`)
-    }
-  }
-
-  if (!key || !salt) {
-    throw new CLIError('ERR_INVALID_ARGUMENT', 'Key and salt not found in keychain or --key/--salt flags', 'Keys should have been auto-stored on escrow create')
-  }
+  // Get keys from keychain or flags
+  const keys = await getAndValidateEscrowKeys({
+    escrowId: parseInt(id, 10),
+    keychain,
+    flagKey: opts.key,
+    flagSalt: opts.salt,
+  })
 
   // Validate key and salt format
-  const validatedKey = validateBytes32(key, 'Encryption key')
-  const validatedSalt = validateBytes32(salt, 'Salt')
+  const validatedKey = validateBytes32(keys.encryptionKey, 'Encryption key')
+  const validatedSalt = validateBytes32(keys.salt, 'Salt')
 
   // Compute commitment = keccak256(key || salt) — must match what was used at creation
   const commitment = keccak256(concat([validatedKey, validatedSalt]))
 
-  console.error(`Chain: ${chainConfig.name} (${chainConfig.chainId})`)
-  console.error(`Commit key for escrow #${id}`)
+  logChainInfo({ chainConfig, address, action: 'Commit key for', escrowId: id })
   console.error(`Commitment: ${commitment}`)
-  console.error(`From: ${address}`)
-
   await confirmAction('Confirm transaction?', opts)
 
-  const hash = await wallet.writeContract({
+  const { hash, receipt } = await executeContractTx({
+    wallet, pub,
     address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
     functionName: 'commitKeyRelease',
     args: [escrowId, commitment],
+    chainConfig,
+    description: 'Commit key',
   })
 
-  console.error(`Transaction: ${hash}`)
-  console.error(`Explorer: ${txLink(hash, chainConfig.explorer)}`)
-
-  const receipt = await pub.waitForTransactionReceipt({ hash, timeout: CHAIN_TIMEOUT_MS })
-  if (receipt.status === 'reverted') throw new CLIError('ERR_TX_REVERTED', 'Transaction reverted')
-
-  return {
-    txHash: hash,
-    status: receipt.status,
-    blockNumber: Number(receipt.blockNumber),
-    chain: chainConfig.name,
-    explorer: txLink(hash, chainConfig.explorer),
-  }
+  return formatTxResult(hash, receipt, chainConfig)
 }
 
-export async function escrowsRevealKey(id: string, opts: { key?: string; salt?: string; yes?: boolean }, keychain: Keychain = defaultKeychain) {
+export async function escrowsRevealKey(id: string, opts: { key?: string; salt?: string; yes?: boolean }, keychain: Keychain = defaultKeychain): Promise<TxResult> {
   requireConfirmation(opts)
   const { pub, wallet, address, chainConfig } = await getChainClient(keychain)
   const escrowId = parseBigInt(id, 'escrow ID')
 
-  // Try to get key/salt from keychain first, then fall back to opts
-  let key = opts.key
-  let salt = opts.salt
-
-  if (!key || !salt) {
-    const stored = await getEscrowKeys(parseInt(id, 10), keychain)
-    if (stored) {
-      key = key || stored.encryptionKey
-      salt = salt || stored.salt
-      console.error(`Using keys from keychain for escrow #${id}`)
-    }
-  }
-
-  if (!key || !salt) {
-    throw new CLIError('ERR_INVALID_ARGUMENT', 'Key and salt not found in keychain or --key/--salt flags', 'Keys should have been auto-stored on escrow create')
-  }
+  // Get keys from keychain or flags
+  const keys = await getAndValidateEscrowKeys({
+    escrowId: parseInt(id, 10),
+    keychain,
+    flagKey: opts.key,
+    flagSalt: opts.salt,
+  })
 
   // Validate key and salt format
-  const validatedKey = validateBytes32(key, 'Encryption key')
-  const validatedSalt = validateBytes32(salt, 'Salt')
+  const validatedKey = validateBytes32(keys.encryptionKey, 'Encryption key')
+  const validatedSalt = validateBytes32(keys.salt, 'Salt')
 
-  console.error(`Chain: ${chainConfig.name} (${chainConfig.chainId})`)
-  console.error(`Reveal key for escrow #${id}`)
-  console.error(`From: ${address}`)
-
+  logChainInfo({ chainConfig, address, action: 'Reveal key for', escrowId: id })
   await confirmAction('Confirm transaction?', opts)
 
-  // For reveal, we pass the encryption key as bytes (the buyer will decrypt with their key)
-  const hash = await wallet.writeContract({
+  const { hash, receipt } = await executeContractTx({
+    wallet, pub,
     address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
     functionName: 'revealKey',
     args: [escrowId, validatedKey, validatedSalt],
+    chainConfig,
+    description: 'Reveal key',
   })
 
-  console.error(`Transaction: ${hash}`)
-  console.error(`Explorer: ${txLink(hash, chainConfig.explorer)}`)
-
-  const receipt = await pub.waitForTransactionReceipt({ hash, timeout: CHAIN_TIMEOUT_MS })
-  if (receipt.status === 'reverted') throw new CLIError('ERR_TX_REVERTED', 'Transaction reverted')
-
-  return {
-    txHash: hash,
-    status: receipt.status,
-    blockNumber: Number(receipt.blockNumber),
-    chain: chainConfig.name,
-    explorer: txLink(hash, chainConfig.explorer),
-  }
+  return formatTxResult(hash, receipt, chainConfig)
 }
 
-export async function escrowsClaim(id: string, opts: { yes?: boolean }, keychain: Keychain = defaultKeychain) {
+export async function escrowsClaim(id: string, opts: { yes?: boolean }, keychain: Keychain = defaultKeychain): Promise<TxResult> {
   requireConfirmation(opts)
   const { pub, wallet, address, chainConfig } = await getChainClient(keychain)
   const escrowId = parseBigInt(id, 'escrow ID')
 
-  console.error(`Chain: ${chainConfig.name} (${chainConfig.chainId})`)
-  console.error(`Claim payment for escrow #${id}`)
-  console.error(`From: ${address}`)
-
+  logChainInfo({ chainConfig, address, action: 'Claim payment for', escrowId: id })
   await confirmAction('Confirm transaction?', opts)
 
-  const hash = await wallet.writeContract({
+  const { hash, receipt } = await executeContractTx({
+    wallet, pub,
     address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
     functionName: 'claimPayment',
     args: [escrowId],
+    chainConfig,
+    description: 'Claim payment',
   })
 
-  console.error(`Transaction: ${hash}`)
-  console.error(`Explorer: ${txLink(hash, chainConfig.explorer)}`)
-
-  const receipt = await pub.waitForTransactionReceipt({ hash, timeout: CHAIN_TIMEOUT_MS })
-  if (receipt.status === 'reverted') throw new CLIError('ERR_TX_REVERTED', 'Transaction reverted')
-
-  return {
-    txHash: hash,
-    status: receipt.status,
-    blockNumber: Number(receipt.blockNumber),
-    chain: chainConfig.name,
-    explorer: txLink(hash, chainConfig.explorer),
-  }
+  return formatTxResult(hash, receipt, chainConfig)
 }
 
 // ── Config ──
@@ -728,20 +635,7 @@ export async function create(opts: CreateOpts, keychain: Keychain = defaultKeych
   console.error(`  Content hash: ${contentHash}`)
 
   // 4. Get BEE_API and BEE_STAMP from keychain
-  const beeApi = await keychain.get('BEE_API') || process.env.BEE_API
-  const beeStamp = await keychain.get('BEE_STAMP') || process.env.BEE_STAMP
-
-  if (!beeApi) {
-    throw new CLIError('ERR_MISSING_KEY', 'BEE_API not configured', 'Use: ade set BEE_API (e.g., http://localhost:1633)')
-  }
-  if (!beeStamp) {
-    throw new CLIError('ERR_MISSING_KEY', 'BEE_STAMP not configured', 'Use: ade set BEE_STAMP (64-char hex batch ID)')
-  }
-
-  // Validate stamp format
-  if (!/^[0-9a-f]{64}$/i.test(beeStamp)) {
-    throw new CLIError('ERR_INVALID_ARGUMENT', 'BEE_STAMP must be 64 hex characters')
-  }
+  const { beeApi, beeStamp } = await requireBeeConfig(keychain)
 
   // 5. Check stamp validity
   console.error(`Checking postage stamp...`)
@@ -755,30 +649,19 @@ export async function create(opts: CreateOpts, keychain: Keychain = defaultKeych
 
   // Estimate gas
   console.error(`Estimating gas on ${chainConfig.name}...`)
-  const gasEstimate = await pub.estimateContractGas({
+  const { gasCost } = await estimateAndValidateGas({
+    pub,
     address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
     functionName: 'createEscrow',
     args: [contentHash, keyCommitment, nativeToken, amount, DEFAULT_EXPIRY_DAYS],
     account: address,
-  }).catch((err) => {
-    throw new CLIError('ERR_API_ERROR', `Gas estimation failed: ${err.message}`, 'Check RPC connection and contract state')
   })
-
-  const gasPrice = await pub.getGasPrice().catch(() => {
-    throw new CLIError('ERR_API_ERROR', 'Could not fetch gas price', 'Check RPC connection')
-  })
-  const gasCost = gasEstimate * gasPrice
 
   console.error(`  Chain: ${chainConfig.name} (${chainConfig.chainId})`)
   console.error(`  Contract: ${chainConfig.escrowAddress}`)
   console.error(`  Price: ${opts.price} ETH`)
   console.error(`  From: ${address}`)
   console.error(`  Estimated gas: ~${formatEther(gasCost)} ETH`)
-
-  if (gasCost > GAS_SAFETY_CAP) {
-    throw new CLIError('ERR_GAS_TOO_HIGH', `Gas cost ${formatEther(gasCost)} ETH exceeds safety cap of ${formatEther(GAS_SAFETY_CAP)} ETH`, 'Network may be congested, try again later')
-  }
 
   // If dry-run, return validation results without executing
   if (opts.dryRun) {
@@ -807,23 +690,14 @@ export async function create(opts: CreateOpts, keychain: Keychain = defaultKeych
 
   // 8. Execute transaction
   console.error(`Creating escrow on ${chainConfig.name}...`)
-  const hash = await wallet.writeContract({
+  const { hash, receipt } = await executeContractTx({
+    wallet, pub,
     address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
     functionName: 'createEscrow',
     args: [contentHash, keyCommitment, nativeToken, amount, DEFAULT_EXPIRY_DAYS],
+    chainConfig,
+    description: 'Create escrow',
   })
-
-  console.error(`  Transaction: ${hash}`)
-  console.error(`  Explorer: ${txLink(hash, chainConfig.explorer)}`)
-
-  // 9. Wait for confirmation and parse escrow ID
-  console.error(`Waiting for confirmation...`)
-  const receipt = await pub.waitForTransactionReceipt({ hash, timeout: CHAIN_TIMEOUT_MS })
-
-  if (receipt.status === 'reverted') {
-    throw new CLIError('ERR_TX_REVERTED', 'Transaction reverted', 'Check contract state and parameters')
-  }
 
   console.error(`  Block: ${receipt.blockNumber}`)
 
@@ -923,21 +797,7 @@ export async function escrowsStatus(id: string, keychain: Keychain = defaultKeyc
   const escrowId = parseBigInt(id, 'escrow ID')
 
   // Read escrow from chain
-  const escrowData = await pub.readContract({
-    address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
-    functionName: 'getEscrow',
-    args: [escrowId],
-  }).catch(() => null) as {
-    seller: string
-    buyer: string
-    contentHash: string
-    amount: bigint
-    expiresAt: bigint
-    disputeWindow_: bigint
-    state: number
-  } | null
-
+  const escrowData = await getEscrowFromChain(pub, chainConfig.escrowAddress, escrowId)
   if (!escrowData) {
     throw new CLIError('ERR_NOT_FOUND', `Escrow #${id} not found`)
   }
@@ -1024,20 +884,7 @@ export async function buy(opts: BuyOpts, keychain: Keychain = defaultKeychain): 
 
   // 1. Read escrow details from chain
   console.error(`Reading escrow #${opts.escrowId}...`)
-  const escrowData = await pub.readContract({
-    address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
-    functionName: 'getEscrow',
-    args: [escrowId],
-  }).catch(() => null) as {
-    seller: string
-    buyer: string
-    contentHash: Hex
-    amount: bigint
-    expiresAt: bigint
-    state: number
-  } | null
-
+  const escrowData = await getEscrowFromChain(pub, chainConfig.escrowAddress, escrowId)
   if (!escrowData) {
     throw new CLIError('ERR_NOT_FOUND', `Escrow #${opts.escrowId} not found`)
   }
@@ -1074,19 +921,14 @@ export async function buy(opts: BuyOpts, keychain: Keychain = defaultKeychain): 
   }
 
   // 3. Estimate gas and check balance
-  const gasEstimate = await pub.estimateContractGas({
+  const { gasCost } = await estimateAndValidateGas({
+    pub,
     address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
     functionName: 'fundEscrow',
     args: [escrowId],
     value: amount,
     account: address,
-  }).catch((err) => {
-    throw new CLIError('ERR_API_ERROR', `Gas estimation failed: ${err.message}`)
   })
-
-  const gasPrice = await pub.getGasPrice()
-  const gasCost = gasEstimate * gasPrice
   const totalRequired = amount + gasCost
 
   const balance = await pub.getBalance({ address })
@@ -1102,21 +944,15 @@ export async function buy(opts: BuyOpts, keychain: Keychain = defaultKeychain): 
   await confirmAction('Confirm funding?', opts)
 
   // 4. Fund escrow
-  const fundHash = await wallet.writeContract({
+  const { hash: fundHash } = await executeContractTx({
+    wallet, pub,
     address: chainConfig.escrowAddress,
-    abi: DataEscrowABI,
     functionName: 'fundEscrow',
     args: [escrowId],
     value: amount,
+    chainConfig,
+    description: 'Fund escrow',
   })
-
-  console.error(`  Transaction: ${fundHash}`)
-  console.error(`  Explorer: ${txLink(fundHash, chainConfig.explorer)}`)
-
-  const fundReceipt = await pub.waitForTransactionReceipt({ hash: fundHash, timeout: CHAIN_TIMEOUT_MS })
-  if (fundReceipt.status === 'reverted') {
-    throw new CLIError('ERR_TX_REVERTED', 'Fund transaction reverted')
-  }
   console.error(`  Funded successfully`)
 
   // 5. Wait for key reveal
