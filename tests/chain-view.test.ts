@@ -62,7 +62,7 @@ describe("chain view functions", () => {
 
     it("should have escrow contract deployed at expected address", async () => {
       await delay(200); // Small delay to avoid rate limits
-      const code = await withRetry(() => client.getCode({ address: chainConfig.escrowAddress }));
+      const code = await withRetry(() => client.getCode({ address: chainConfig.contracts.dataEscrow }));
       expect(code).toBeDefined();
       expect(code?.length).toBeGreaterThan(2); // More than just "0x"
     });
@@ -70,7 +70,7 @@ describe("chain view functions", () => {
     it("should read nextEscrowId from contract", async () => {
       await delay(200);
       const nextId = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "nextEscrowId",
       }));
@@ -81,7 +81,7 @@ describe("chain view functions", () => {
     it("should read VERSION from contract", async () => {
       await delay(200);
       const version = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "VERSION",
       }));
@@ -92,7 +92,7 @@ describe("chain view functions", () => {
     it("should read DEFAULT_DISPUTE_WINDOW from contract", async () => {
       await delay(200);
       const window = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "DEFAULT_DISPUTE_WINDOW",
       }));
@@ -103,7 +103,7 @@ describe("chain view functions", () => {
     it("should read feeBasisPoints from contract", async () => {
       await delay(200);
       const feeBps = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "feeBasisPoints",
       }));
@@ -116,7 +116,7 @@ describe("chain view functions", () => {
       await delay(200);
       // Read nextEscrowId to find a valid escrow
       const nextId = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "nextEscrowId",
       })) as bigint;
@@ -125,7 +125,7 @@ describe("chain view functions", () => {
         await delay(200);
         // Read escrow #1 (should exist on mainnet)
         const escrow = await withRetry(() => client.readContract({
-          address: chainConfig.escrowAddress,
+          address: chainConfig.contracts.dataEscrow,
           abi: DataEscrowABI,
           functionName: "getEscrow",
           args: [1n],
@@ -140,7 +140,7 @@ describe("chain view functions", () => {
     it("should read treasury address", async () => {
       await delay(200);
       const treasury = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "treasury",
       }));
@@ -150,7 +150,7 @@ describe("chain view functions", () => {
     it("should read owner address", async () => {
       await delay(200);
       const owner = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "owner",
       }));
@@ -161,7 +161,7 @@ describe("chain view functions", () => {
       await delay(200);
       const nativeToken = "0x0000000000000000000000000000000000000000";
       const isSupported = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "isTokenSupported",
         args: [nativeToken],
@@ -173,7 +173,7 @@ describe("chain view functions", () => {
       await delay(200);
       const randomToken = "0x1234567890123456789012345678901234567890";
       const isSupported = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "isTokenSupported",
         args: [randomToken],
@@ -184,7 +184,7 @@ describe("chain view functions", () => {
     it("should read contract pause status", async () => {
       await delay(200);
       const isPaused = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "paused",
       }));
@@ -213,7 +213,7 @@ describe("chain view functions", () => {
 
     it("should have escrow contract deployed at expected address", async () => {
       await delay(200);
-      const code = await withRetry(() => client.getCode({ address: chainConfig.escrowAddress }));
+      const code = await withRetry(() => client.getCode({ address: chainConfig.contracts.dataEscrow }));
       expect(code).toBeDefined();
       expect(code?.length).toBeGreaterThan(2);
     });
@@ -221,7 +221,7 @@ describe("chain view functions", () => {
     it("should read nextEscrowId from contract", async () => {
       await delay(200);
       const nextId = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "nextEscrowId",
       }));
@@ -233,7 +233,7 @@ describe("chain view functions", () => {
     it("should read VERSION from contract", async () => {
       await delay(200);
       const version = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "VERSION",
       }));
@@ -245,7 +245,7 @@ describe("chain view functions", () => {
       await delay(200);
       const nativeToken = "0x0000000000000000000000000000000000000000";
       const isSupported = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "isTokenSupported",
         args: [nativeToken],
@@ -302,7 +302,7 @@ describe("chain view functions", () => {
 
     it("should read MIN_BLOCK_DELAY", async () => {
       const minBlockDelay = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "MIN_BLOCK_DELAY",
       }));
@@ -313,7 +313,7 @@ describe("chain view functions", () => {
     it("should read MIN_TIME_DELAY", async () => {
       await delay(200);
       const minTimeDelay = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "MIN_TIME_DELAY",
       }));
@@ -324,7 +324,7 @@ describe("chain view functions", () => {
     it("should read DISPUTE_BOND_PERCENT", async () => {
       await delay(200);
       const bondPercent = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "DISPUTE_BOND_PERCENT",
       }));
@@ -335,7 +335,7 @@ describe("chain view functions", () => {
     it("should read MAX_DISPUTE_WINDOW", async () => {
       await delay(200);
       const maxWindow = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "MAX_DISPUTE_WINDOW",
       }));
@@ -346,7 +346,7 @@ describe("chain view functions", () => {
     it("should read MIN_AMOUNT_NATIVE", async () => {
       await delay(200);
       const minAmount = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "MIN_AMOUNT_NATIVE",
       }));
@@ -357,7 +357,7 @@ describe("chain view functions", () => {
     it("should read SELLER_RESPONSE_WINDOW", async () => {
       await delay(200);
       const window = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "SELLER_RESPONSE_WINDOW",
       }));
@@ -381,7 +381,7 @@ describe("chain view functions", () => {
     it("should read escrow via getEscrow function", async () => {
       // First check if there are any escrows
       const nextId = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "nextEscrowId",
       })) as bigint;
@@ -389,7 +389,7 @@ describe("chain view functions", () => {
       if (nextId > 1n) {
         await delay(200);
         const escrow = await withRetry(() => client.readContract({
-          address: chainConfig.escrowAddress,
+          address: chainConfig.contracts.dataEscrow,
           abi: DataEscrowABI,
           functionName: "getEscrow",
           args: [1n],
@@ -421,7 +421,7 @@ describe("chain view functions", () => {
 
     it("should read escrow agents", async () => {
       const nextId = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "nextEscrowId",
       })) as bigint;
@@ -429,7 +429,7 @@ describe("chain view functions", () => {
       if (nextId > 1n) {
         await delay(200);
         const agents = await withRetry(() => client.readContract({
-          address: chainConfig.escrowAddress,
+          address: chainConfig.contracts.dataEscrow,
           abi: DataEscrowABI,
           functionName: "getEscrowAgents",
           args: [1n],
@@ -445,7 +445,7 @@ describe("chain view functions", () => {
       await delay(200);
       // Try to read a very high escrow ID that doesn't exist
       const escrow = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "getEscrow",
         args: [999999999n],
@@ -472,7 +472,7 @@ describe("chain view functions", () => {
 
     it("should read arbiters list", async () => {
       const arbiters = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "getArbiters",
       })) as readonly `0x${string}`[];
@@ -490,7 +490,7 @@ describe("chain view functions", () => {
     it("should read requiredVotes", async () => {
       await delay(200);
       const requiredVotes = await withRetry(() => client.readContract({
-        address: chainConfig.escrowAddress,
+        address: chainConfig.contracts.dataEscrow,
         abi: DataEscrowABI,
         functionName: "requiredVotes",
       }));

@@ -7,7 +7,9 @@ describe("addresses", () => {
       expect(CHAINS.base).toBeDefined();
       expect(CHAINS.base.chainId).toBe(8453);
       expect(CHAINS.base.name).toBe("Base");
-      expect(CHAINS.base.escrowAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(CHAINS.base.contracts.dataEscrow).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(CHAINS.base.contracts.usdc).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(CHAINS.base.contracts.usdt).toMatch(/^0x[0-9a-fA-F]{40}$/);
       expect(CHAINS.base.explorer).toContain("basescan.org");
     });
 
@@ -15,14 +17,18 @@ describe("addresses", () => {
       expect(CHAINS.baseSepolia).toBeDefined();
       expect(CHAINS.baseSepolia.chainId).toBe(84532);
       expect(CHAINS.baseSepolia.name).toBe("Base Sepolia");
-      expect(CHAINS.baseSepolia.escrowAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(CHAINS.baseSepolia.contracts.dataEscrow).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(CHAINS.baseSepolia.contracts.identity).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(CHAINS.baseSepolia.contracts.reputation).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(CHAINS.baseSepolia.contracts.validation).toMatch(/^0x[0-9a-fA-F]{40}$/);
+      expect(CHAINS.baseSepolia.contracts.usdc).toMatch(/^0x[0-9a-fA-F]{40}$/);
       expect(CHAINS.baseSepolia.explorer).toContain("sepolia.basescan.org");
     });
 
     it("should have checksummed addresses", () => {
       // Checksummed addresses have mixed case
-      expect(CHAINS.base.escrowAddress).not.toBe(CHAINS.base.escrowAddress.toLowerCase());
-      expect(CHAINS.baseSepolia.escrowAddress).not.toBe(CHAINS.baseSepolia.escrowAddress.toLowerCase());
+      expect(CHAINS.base.contracts.dataEscrow).not.toBe(CHAINS.base.contracts.dataEscrow.toLowerCase());
+      expect(CHAINS.baseSepolia.contracts.dataEscrow).not.toBe(CHAINS.baseSepolia.contracts.dataEscrow.toLowerCase());
     });
 
     it("should have default RPC endpoints", () => {

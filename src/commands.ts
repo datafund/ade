@@ -13,6 +13,19 @@ import { DataEscrowABI } from './abi/DataEscrow'
 import { storeEscrowKeys, getEscrowKeys } from './escrow-keys'
 import { getChainConfig, CHAIN_BY_ID, DEFAULT_CHAIN, DEFAULT_RPC, type ChainConfig } from './addresses'
 import { encryptForEscrow, decryptFromEscrow } from './crypto/escrow'
+import {
+  generateKeyPair,
+  encryptKeyForBuyer,
+  decryptKeyAsBuyer,
+  serializeEncryptedKey,
+  deserializeEncryptedKey,
+  publicKeyToAddress,
+  publicKeyToHex,
+  addressToHex,
+  hexToBytes,
+  type KeyPair,
+} from './crypto/fairdrop'
+import { createKeystore, parseKeystore, validatePassword, type KeystorePayload } from './crypto/keystore'
 import { uploadToSwarm, checkStampValid, downloadFromSwarm } from './swarm'
 import { parseEscrowIdFromLogs, waitForKeyRevealed } from './utils/events'
 import {
@@ -290,14 +303,14 @@ export async function escrowsCreate(opts: { contentHash: string; price: string; 
   // Estimate gas
   const { gasCost } = await estimateAndValidateGas({
     pub,
-    address: chainConfig.escrowAddress,
+    address: chainConfig.contracts.dataEscrow,
     functionName: 'createEscrow',
     args: [contentHash, keyCommitment, nativeToken, amount, DEFAULT_EXPIRY_DAYS],
     account: address,
   })
 
   logChainInfo({ chainConfig, address })
-  console.error(`Contract: ${chainConfig.escrowAddress}`)
+  console.error(`Contract: ${chainConfig.contracts.dataEscrow}`)
   console.error(`Create escrow: ${opts.price} ETH`)
   console.error(`Estimated gas cost: ~${formatEther(gasCost)} ETH`)
 
@@ -305,7 +318,7 @@ export async function escrowsCreate(opts: { contentHash: string; price: string; 
 
   const { hash, receipt } = await executeContractTx({
     wallet, pub,
-    address: chainConfig.escrowAddress,
+    address: chainConfig.contracts.dataEscrow,
     functionName: 'createEscrow',
     args: [contentHash, keyCommitment, nativeToken, amount, DEFAULT_EXPIRY_DAYS],
     chainConfig,
@@ -358,7 +371,7 @@ export async function escrowsFund(id: string, opts: { yes?: boolean }, keychain:
   const escrowId = parseBigInt(id, 'escrow ID')
 
   // Read amount from on-chain contract (never trust off-chain API for tx params)
-  const escrowData = await getEscrowFromChain(pub, chainConfig.escrowAddress, escrowId)
+  const escrowData = await getEscrowFromChain(pub, chainConfig.contracts.dataEscrow, escrowId)
   const amount = escrowData?.amount ?? 0n
   if (amount === 0n) {
     throw new CLIError('ERR_NOT_FOUND', `Escrow #${id} not found or has zero amount`)
@@ -369,7 +382,7 @@ export async function escrowsFund(id: string, opts: { yes?: boolean }, keychain:
 
   const { hash, receipt } = await executeContractTx({
     wallet, pub,
-    address: chainConfig.escrowAddress,
+    address: chainConfig.contracts.dataEscrow,
     functionName: 'fundEscrow',
     args: [escrowId],
     value: amount,
@@ -406,7 +419,7 @@ export async function escrowsCommitKey(id: string, opts: { key?: string; salt?: 
 
   const { hash, receipt } = await executeContractTx({
     wallet, pub,
-    address: chainConfig.escrowAddress,
+    address: chainConfig.contracts.dataEscrow,
     functionName: 'commitKeyRelease',
     args: [escrowId, commitment],
     chainConfig,
@@ -416,7 +429,7 @@ export async function escrowsCommitKey(id: string, opts: { key?: string; salt?: 
   return formatTxResult(hash, receipt, chainConfig)
 }
 
-export async function escrowsRevealKey(id: string, opts: { key?: string; salt?: string; yes?: boolean }, keychain: Keychain = defaultKeychain): Promise<TxResult> {
+export async function escrowsRevealKey(id: string, opts: { key?: string; salt?: string; buyerPubkey?: string; yes?: boolean }, keychain: Keychain = defaultKeychain): Promise<TxResult & { ecdhEncrypted?: boolean }> {
   requireConfirmation(opts)
   const { pub, wallet, address, chainConfig } = await getChainClient(keychain)
   const escrowId = parseBigInt(id, 'escrow ID')
@@ -433,19 +446,67 @@ export async function escrowsRevealKey(id: string, opts: { key?: string; salt?: 
   const validatedKey = validateBytes32(keys.encryptionKey, 'Encryption key')
   const validatedSalt = validateBytes32(keys.salt, 'Salt')
 
+  // Get escrow details to find buyer address
+  const escrowData = await getEscrowFromChain(pub, chainConfig.contracts.dataEscrow, escrowId)
+  if (!escrowData) {
+    throw new CLIError('ERR_NOT_FOUND', `Escrow #${id} not found`)
+  }
+
+  const buyerAddress = escrowData.buyer
+  if (!buyerAddress || buyerAddress === '0x0000000000000000000000000000000000000000') {
+    throw new CLIError('ERR_INVALID_ARGUMENT', 'Escrow has no buyer yet', 'Wait for a buyer to fund the escrow')
+  }
+
+  // Parse buyer's public key if provided
+  let buyerPubkey: Uint8Array | null = null
+  if (opts.buyerPubkey) {
+    try {
+      buyerPubkey = hexToBytes(opts.buyerPubkey)
+      if (buyerPubkey.length !== 33 && buyerPubkey.length !== 65) {
+        throw new Error('Invalid length')
+      }
+    } catch {
+      throw new CLIError(
+        'ERR_INVALID_ARGUMENT',
+        'Invalid buyer public key format',
+        'Use compressed (33 bytes) or uncompressed (65 bytes) secp256k1 public key in hex'
+      )
+    }
+  }
+
+  let keyToReveal: `0x${string}`
+  let ecdhEncrypted = false
+
+  if (buyerPubkey) {
+    // ECDH path: encrypt AES key for buyer
+    console.error(`Using ECDH encryption for buyer's public key`)
+    const keyBytes = hexToBytes(validatedKey)
+    const encrypted = encryptKeyForBuyer(keyBytes, buyerPubkey)
+    const serialized = serializeEncryptedKey(encrypted)
+    keyToReveal = ('0x' + Array.from(serialized, b => b.toString(16).padStart(2, '0')).join('')) as `0x${string}`
+    ecdhEncrypted = true
+  } else {
+    // Legacy path: reveal raw key
+    console.error(`No buyer public key provided, revealing raw key`)
+    console.error(`Warning: Raw key will be visible on-chain`)
+    console.error(`Tip: Ask buyer for their public key (ade account status) for ECDH encryption`)
+    keyToReveal = validatedKey
+  }
+
   logChainInfo({ chainConfig, address, action: 'Reveal key for', escrowId: id })
   await confirmAction('Confirm transaction?', opts)
 
   const { hash, receipt } = await executeContractTx({
     wallet, pub,
-    address: chainConfig.escrowAddress,
+    address: chainConfig.contracts.dataEscrow,
     functionName: 'revealKey',
-    args: [escrowId, validatedKey, validatedSalt],
+    args: [escrowId, keyToReveal, validatedSalt],
     chainConfig,
     description: 'Reveal key',
   })
 
-  return formatTxResult(hash, receipt, chainConfig)
+  const result = formatTxResult(hash, receipt, chainConfig)
+  return { ...result, ecdhEncrypted }
 }
 
 export async function escrowsClaim(id: string, opts: { yes?: boolean }, keychain: Keychain = defaultKeychain): Promise<TxResult> {
@@ -458,7 +519,7 @@ export async function escrowsClaim(id: string, opts: { yes?: boolean }, keychain
 
   const { hash, receipt } = await executeContractTx({
     wallet, pub,
-    address: chainConfig.escrowAddress,
+    address: chainConfig.contracts.dataEscrow,
     functionName: 'claimPayment',
     args: [escrowId],
     chainConfig,
@@ -505,15 +566,15 @@ export async function configShow(keychain: Keychain = defaultKeychain) {
     supportedChains: Object.entries(CHAIN_BY_ID).map(([id, c]) => ({
       chainId: Number(id),
       name: c.name,
-      escrowAddress: c.escrowAddress,
+      contracts: c.contracts,
       defaultRpc: c.defaultRpc,
     })),
   }
 }
 
-// ── Create Command (Unified Escrow Creation) ──
+// ── Sell Command (Unified Escrow Creation) ──
 
-export interface CreateResult {
+export interface SellResult {
   escrowId: number
   txHash: Hex
   contentHash: Hex
@@ -542,7 +603,7 @@ export interface DryRunResult {
   stampValid: boolean
 }
 
-export interface CreateOpts {
+export interface SellOpts {
   /** Path to file to encrypt and escrow */
   file: string
   /** Price in ETH (e.g., "0.1") */
@@ -558,7 +619,7 @@ export interface CreateOpts {
 }
 
 /**
- * Unified create command: encrypts file, uploads to Swarm, creates escrow.
+ * Unified sell command: encrypts file, uploads to Swarm, creates escrow.
  *
  * This is the complete seller flow in a single command:
  * 1. Validates file exists, is readable, and under size limit
@@ -569,23 +630,23 @@ export interface CreateOpts {
  * 6. Creates escrow on-chain with key commitment
  * 7. Stores encryption keys and Swarm ref in keychain
  *
- * @param opts - Create options including file path and price
+ * @param opts - Sell options including file path and price
  * @param keychain - Keychain for storing/retrieving secrets
- * @returns CreateResult with escrow ID and all references, or DryRunResult in dry-run mode
+ * @returns SellResult with escrow ID and all references, or DryRunResult in dry-run mode
  *
  * @throws CLIError on file not found, permission denied, file too large,
  *         invalid stamp, Swarm upload failure, chain transaction failure
  *
  * @example
  * ```bash
- * # Create escrow from file
- * ade create --file ./data.csv --price 0.1 --yes
+ * # Sell data via escrow
+ * ade sell --file ./data.csv --price 0.1 --yes
  *
  * # Dry run to validate without spending gas
- * ade create --file ./data.csv --price 0.1 --dry-run
+ * ade sell --file ./data.csv --price 0.1 --dry-run
  * ```
  */
-export async function create(opts: CreateOpts, keychain: Keychain = defaultKeychain): Promise<CreateResult | DryRunResult> {
+export async function sell(opts: SellOpts, keychain: Keychain = defaultKeychain): Promise<SellResult | DryRunResult> {
   if (!opts.dryRun) {
     requireConfirmation(opts)
   }
@@ -651,14 +712,14 @@ export async function create(opts: CreateOpts, keychain: Keychain = defaultKeych
   console.error(`Estimating gas on ${chainConfig.name}...`)
   const { gasCost } = await estimateAndValidateGas({
     pub,
-    address: chainConfig.escrowAddress,
+    address: chainConfig.contracts.dataEscrow,
     functionName: 'createEscrow',
     args: [contentHash, keyCommitment, nativeToken, amount, DEFAULT_EXPIRY_DAYS],
     account: address,
   })
 
   console.error(`  Chain: ${chainConfig.name} (${chainConfig.chainId})`)
-  console.error(`  Contract: ${chainConfig.escrowAddress}`)
+  console.error(`  Contract: ${chainConfig.contracts.dataEscrow}`)
   console.error(`  Price: ${opts.price} ETH`)
   console.error(`  From: ${address}`)
   console.error(`  Estimated gas: ~${formatEther(gasCost)} ETH`)
@@ -692,7 +753,7 @@ export async function create(opts: CreateOpts, keychain: Keychain = defaultKeych
   console.error(`Creating escrow on ${chainConfig.name}...`)
   const { hash, receipt } = await executeContractTx({
     wallet, pub,
-    address: chainConfig.escrowAddress,
+    address: chainConfig.contracts.dataEscrow,
     functionName: 'createEscrow',
     args: [contentHash, keyCommitment, nativeToken, amount, DEFAULT_EXPIRY_DAYS],
     chainConfig,
@@ -751,6 +812,13 @@ export async function create(opts: CreateOpts, keychain: Keychain = defaultKeych
   }
 }
 
+/** @deprecated Use `sell` instead */
+export const create = sell
+
+// Type aliases for backward compatibility
+export type CreateOpts = SellOpts
+export type CreateResult = SellResult
+
 /**
  * Format bytes as human-readable string.
  */
@@ -797,7 +865,7 @@ export async function escrowsStatus(id: string, keychain: Keychain = defaultKeyc
   const escrowId = parseBigInt(id, 'escrow ID')
 
   // Read escrow from chain
-  const escrowData = await getEscrowFromChain(pub, chainConfig.escrowAddress, escrowId)
+  const escrowData = await getEscrowFromChain(pub, chainConfig.contracts.dataEscrow, escrowId)
   if (!escrowData) {
     throw new CLIError('ERR_NOT_FOUND', `Escrow #${id} not found`)
   }
@@ -857,6 +925,7 @@ export interface BuyResult {
   contentHash: Hex
   verified: boolean
   decryptedSize: number
+  ecdhDecrypted?: boolean
 }
 
 /**
@@ -882,9 +951,20 @@ export async function buy(opts: BuyOpts, keychain: Keychain = defaultKeychain): 
   const escrowId = parseBigInt(opts.escrowId, 'escrow ID')
   const waitTimeout = opts.waitTimeout ?? DEFAULT_KEY_WAIT_TIMEOUT
 
+  // Check for active Fairdrop account (optional but recommended)
+  const account = getActiveAccount()
+  if (account) {
+    console.error(`Using Fairdrop account: ${account.subdomain}`)
+    console.error(`  Your public key for ECDH: ${publicKeyToHex(account.publicKey)}`)
+    console.error(`  Share this with the seller for secure key exchange`)
+  } else {
+    console.error(`No Fairdrop account unlocked. ECDH key exchange will not be available.`)
+    console.error(`Tip: Run 'ade account create' and 'ade account unlock' for secure key exchange.`)
+  }
+
   // 1. Read escrow details from chain
   console.error(`Reading escrow #${opts.escrowId}...`)
-  const escrowData = await getEscrowFromChain(pub, chainConfig.escrowAddress, escrowId)
+  const escrowData = await getEscrowFromChain(pub, chainConfig.contracts.dataEscrow, escrowId)
   if (!escrowData) {
     throw new CLIError('ERR_NOT_FOUND', `Escrow #${opts.escrowId} not found`)
   }
@@ -923,7 +1003,7 @@ export async function buy(opts: BuyOpts, keychain: Keychain = defaultKeychain): 
   // 3. Estimate gas and check balance
   const { gasCost } = await estimateAndValidateGas({
     pub,
-    address: chainConfig.escrowAddress,
+    address: chainConfig.contracts.dataEscrow,
     functionName: 'fundEscrow',
     args: [escrowId],
     value: amount,
@@ -946,7 +1026,7 @@ export async function buy(opts: BuyOpts, keychain: Keychain = defaultKeychain): 
   // 4. Fund escrow
   const { hash: fundHash } = await executeContractTx({
     wallet, pub,
-    address: chainConfig.escrowAddress,
+    address: chainConfig.contracts.dataEscrow,
     functionName: 'fundEscrow',
     args: [escrowId],
     value: amount,
@@ -955,13 +1035,14 @@ export async function buy(opts: BuyOpts, keychain: Keychain = defaultKeychain): 
   })
   console.error(`  Funded successfully`)
 
+
   // 5. Wait for key reveal
   console.error(`\nWaiting for seller to reveal key (timeout: ${waitTimeout}s)...`)
   console.error(`  This may take a while. The seller needs to call commit-key then reveal-key.`)
 
   const revealedKey = await waitForKeyRevealed(
     pub,
-    chainConfig.escrowAddress,
+    chainConfig.contracts.dataEscrow,
     parseInt(opts.escrowId, 10),
     waitTimeout
   )
@@ -992,11 +1073,46 @@ export async function buy(opts: BuyOpts, keychain: Keychain = defaultKeychain): 
 
   // 8. Decrypt data
   console.error(`Decrypting...`)
-  // The revealed key is the encryption key as bytes (already hex)
-  const keyBytes = Buffer.from(revealedKey.slice(2), 'hex')
+
+  // Determine if key is ECDH-encrypted or raw
+  // ECDH-encrypted keys are longer (33 pubkey + 12 iv + encrypted key with tag)
+  // Raw keys are exactly 32 bytes (64 hex chars + 0x prefix = 66 chars)
+  const revealedKeyBytes = hexToBytes(revealedKey)
+  let keyBytes: Uint8Array
+  let ecdhDecrypted = false
+
+  if (revealedKeyBytes.length === 32) {
+    // Raw key (legacy mode)
+    console.error(`  Using raw key (legacy mode)`)
+    keyBytes = revealedKeyBytes
+  } else if (revealedKeyBytes.length > 32 && account) {
+    // ECDH-encrypted key
+    console.error(`  Decrypting ECDH-encrypted key...`)
+    try {
+      const encrypted = deserializeEncryptedKey(revealedKeyBytes)
+      keyBytes = decryptKeyAsBuyer(encrypted, account.privateKey)
+      ecdhDecrypted = true
+    } catch (err) {
+      throw new CLIError(
+        'ERR_INVALID_ARGUMENT',
+        `Failed to decrypt ECDH key: ${(err as Error).message}`,
+        'Make sure you have the correct Fairdrop account unlocked'
+      )
+    }
+  } else if (revealedKeyBytes.length > 32) {
+    // ECDH-encrypted but no account unlocked
+    throw new CLIError(
+      'ERR_MISSING_KEY',
+      'Key is ECDH-encrypted but no Fairdrop account is unlocked',
+      'Use: ade account unlock <subdomain>'
+    )
+  } else {
+    throw new CLIError('ERR_INVALID_ARGUMENT', `Invalid key length: ${revealedKeyBytes.length}`)
+  }
+
   const decrypted = decryptFromEscrow({
     encryptedData,
-    key: new Uint8Array(keyBytes),
+    key: keyBytes,
   })
   console.error(`  Decrypted size: ${formatBytes(decrypted.length)}`)
 
@@ -1012,7 +1128,512 @@ export async function buy(opts: BuyOpts, keychain: Keychain = defaultKeychain): 
     contentHash: contentHash as Hex,
     verified,
     decryptedSize: decrypted.length,
+    ecdhDecrypted,
   }
+}
+
+// ── Account Commands ──
+
+// In-memory session state for unlocked account
+let activeAccount: {
+  subdomain: string
+  publicKey: Uint8Array
+  privateKey: Uint8Array
+  address: string
+} | null = null
+
+// Keychain storage keys
+const FAIRDROP_ACCOUNTS_KEY = 'FAIRDROP_ACCOUNTS'
+const FAIRDROP_KEYSTORE_PREFIX = 'FAIRDROP_KEYSTORE_'
+const FAIRDROP_ACTIVE_KEY = 'FAIRDROP_ACTIVE'
+
+/**
+ * Get list of stored account subdomains.
+ */
+async function getStoredAccounts(keychain: Keychain): Promise<string[]> {
+  const accounts = await keychain.get(FAIRDROP_ACCOUNTS_KEY)
+  if (!accounts) return []
+  try {
+    return JSON.parse(accounts)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Add subdomain to stored accounts list.
+ */
+async function addStoredAccount(subdomain: string, keychain: Keychain): Promise<void> {
+  const accounts = await getStoredAccounts(keychain)
+  if (!accounts.includes(subdomain)) {
+    accounts.push(subdomain)
+    await keychain.set(FAIRDROP_ACCOUNTS_KEY, JSON.stringify(accounts))
+  }
+}
+
+/**
+ * Remove subdomain from stored accounts list.
+ */
+async function removeStoredAccount(subdomain: string, keychain: Keychain): Promise<void> {
+  const accounts = await getStoredAccounts(keychain)
+  const filtered = accounts.filter(a => a !== subdomain)
+  await keychain.set(FAIRDROP_ACCOUNTS_KEY, JSON.stringify(filtered))
+}
+
+export interface AccountCreateResult {
+  subdomain: string
+  address: string
+  publicKey: string
+  ensName: string
+  txHash: string
+}
+
+// FDS Identity API base URL
+const FDS_IDENTITY_API = 'https://id.fairdatasociety.org'
+
+/**
+ * Check if an ENS name is available on Fairdrop.
+ * @returns null if available, or the existing record if taken
+ */
+async function checkEnsAvailability(subdomain: string): Promise<{ exists: boolean; owner?: string; publicKey?: string }> {
+  const url = `${FDS_IDENTITY_API}/api/ens/lookup/${encodeURIComponent(subdomain)}`
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(30000),
+  })
+
+  if (!res.ok) {
+    if (res.status === 404) {
+      return { exists: false }
+    }
+    const body = await res.text().catch(() => '')
+    throw new CLIError('ERR_API_ERROR', `ENS lookup failed: ${res.status} ${body}`)
+  }
+
+  const data = await res.json() as { exists: boolean; owner?: string; publicKey?: string }
+  return data
+}
+
+/**
+ * Register a subdomain on Fairdrop ENS.
+ */
+async function registerEns(subdomain: string, publicKey: string): Promise<{ ensName: string; txHash: string }> {
+  const url = `${FDS_IDENTITY_API}/api/ens/register`
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: subdomain, publicKey }),
+    signal: AbortSignal.timeout(120000), // 2 min timeout for on-chain tx
+  })
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new CLIError('ERR_API_ERROR', `ENS registration failed: ${res.status} ${body}`)
+  }
+
+  const data = await res.json() as { success: boolean; ensName: string; txHash: string; error?: string }
+  if (!data.success) {
+    throw new CLIError('ERR_API_ERROR', `ENS registration failed: ${data.error || 'Unknown error'}`)
+  }
+
+  return { ensName: data.ensName, txHash: data.txHash }
+}
+
+/**
+ * Create a new Fairdrop account.
+ *
+ * Flow:
+ * 1. Check if name exists on ENS (fail if taken)
+ * 2. Generate keypair locally
+ * 3. Register with ENS
+ * 4. Encrypt and store keystore locally
+ *
+ * @param subdomain - User's chosen name/subdomain
+ * @param password - Password for encrypting the keystore
+ * @param keychain - Keychain for storage
+ * @returns Account details including ENS registration
+ */
+export async function accountCreate(
+  subdomain: string,
+  password: string,
+  keychain: Keychain = defaultKeychain
+): Promise<AccountCreateResult> {
+  // Validate subdomain format
+  if (!subdomain || subdomain.length < 1) {
+    throw new CLIError('ERR_INVALID_ARGUMENT', 'Subdomain cannot be empty')
+  }
+  if (!/^[a-z0-9_-]+$/i.test(subdomain)) {
+    throw new CLIError('ERR_INVALID_ARGUMENT', 'Subdomain can only contain letters, numbers, hyphens, and underscores')
+  }
+
+  // Check if account already exists locally
+  const existingAccounts = await getStoredAccounts(keychain)
+  if (existingAccounts.includes(subdomain)) {
+    throw new CLIError('ERR_INVALID_ARGUMENT', `Account "${subdomain}" already exists locally`)
+  }
+
+  // Validate password
+  const passwordError = validatePassword(password)
+  if (passwordError) {
+    throw new CLIError('ERR_INVALID_ARGUMENT', passwordError)
+  }
+
+  // Step 1: Check ENS availability
+  console.error(`Checking ENS availability for "${subdomain}"...`)
+  const ensCheck = await checkEnsAvailability(subdomain)
+  if (ensCheck.exists) {
+    throw new CLIError(
+      'ERR_INVALID_ARGUMENT',
+      `Name "${subdomain}" is already registered on ENS`,
+      `Owner: ${ensCheck.owner || 'unknown'}`
+    )
+  }
+  console.error(`  Name "${subdomain}" is available`)
+
+  // Step 2: Generate keypair
+  console.error('Generating keypair...')
+  const keypair = generateKeyPair()
+  const addressBytes = publicKeyToAddress(keypair.publicKey)
+  const address = addressToHex(addressBytes)
+  const publicKeyHex = publicKeyToHex(keypair.publicKey)
+  console.error(`  Address: ${address}`)
+  console.error(`  Public key: ${publicKeyHex}`)
+
+  // Step 3: Register with ENS
+  console.error('Registering with ENS (this may take a moment)...')
+  let ensResult: { ensName: string; txHash: string }
+  try {
+    ensResult = await registerEns(subdomain, publicKeyHex)
+  } catch (err) {
+    // Clear private key on failure
+    keypair.privateKey.fill(0)
+    throw err
+  }
+  console.error(`  ENS name: ${ensResult.ensName}`)
+  console.error(`  Tx hash: ${ensResult.txHash}`)
+
+  // Step 4: Encrypt and store keystore
+  console.error('Encrypting keystore (this may take a moment)...')
+  const payload: KeystorePayload = {
+    subdomain,
+    publicKey: publicKeyHex,
+    privateKey: '0x' + Array.from(keypair.privateKey, b => b.toString(16).padStart(2, '0')).join(''),
+    created: Date.now(),
+  }
+  const keystoreJson = createKeystore(payload, password)
+
+  await keychain.set(`${FAIRDROP_KEYSTORE_PREFIX}${subdomain}`, keystoreJson)
+  await addStoredAccount(subdomain, keychain)
+
+  // Store ENS registration info and public info (unencrypted, for status without unlock)
+  await keychain.set(`FAIRDROP_ENS_${subdomain}`, ensResult.ensName)
+  await keychain.set(`FAIRDROP_TXHASH_${subdomain}`, ensResult.txHash)
+  await keychain.set(`FAIRDROP_PUBKEY_${subdomain}`, publicKeyHex)
+  await keychain.set(`FAIRDROP_ADDRESS_${subdomain}`, address)
+
+  // Clear private key from memory
+  keypair.privateKey.fill(0)
+
+  console.error(`\nAccount created successfully!`)
+  console.error(`  Subdomain: ${subdomain}`)
+  console.error(`  ENS name: ${ensResult.ensName}`)
+
+  return {
+    subdomain,
+    address,
+    publicKey: publicKeyHex,
+    ensName: ensResult.ensName,
+    txHash: ensResult.txHash,
+  }
+}
+
+export interface AccountUnlockResult {
+  subdomain: string
+  unlocked: boolean
+  address: string
+  publicKey: string
+}
+
+/**
+ * Unlock a Fairdrop account for use.
+ *
+ * This also:
+ * - Locks any previously unlocked account (if different)
+ * - Sets SX_KEY to the account's private key for transaction signing
+ *
+ * @param subdomain - Account subdomain to unlock
+ * @param password - Password to decrypt keystore
+ * @param keychain - Keychain for storage
+ * @returns Unlock result
+ */
+export async function accountUnlock(
+  subdomain: string,
+  password: string,
+  keychain: Keychain = defaultKeychain
+): Promise<AccountUnlockResult> {
+  // Lock existing account if switching to a different one
+  if (activeAccount && activeAccount.subdomain !== subdomain) {
+    console.error(`Locking previous account: ${activeAccount.subdomain}`)
+    activeAccount.privateKey.fill(0)
+    activeAccount = null
+  }
+
+  // Get keystore
+  const keystoreJson = await keychain.get(`${FAIRDROP_KEYSTORE_PREFIX}${subdomain}`)
+  if (!keystoreJson) {
+    throw new CLIError('ERR_NOT_FOUND', `Account "${subdomain}" not found`, 'Use: ade account create <subdomain>')
+  }
+
+  // Decrypt keystore
+  console.error('Decrypting keystore (this may take a moment)...')
+  let payload: KeystorePayload
+  try {
+    payload = parseKeystore(keystoreJson, password)
+  } catch (err) {
+    if ((err as Error).message.includes('Incorrect password')) {
+      throw new CLIError('ERR_INVALID_ARGUMENT', 'Incorrect password')
+    }
+    throw err
+  }
+
+  // Store in session
+  const privateKey = hexToBytes(payload.privateKey)
+  const publicKey = hexToBytes(payload.publicKey)
+  const addressBytes = publicKeyToAddress(publicKey)
+
+  activeAccount = {
+    subdomain: payload.subdomain,
+    publicKey,
+    privateKey,
+    address: addressToHex(addressBytes),
+  }
+
+  // Store active account name
+  await keychain.set(FAIRDROP_ACTIVE_KEY, subdomain)
+
+  // Auto-set SX_KEY to account's private key for transaction signing
+  await keychain.set('SX_KEY', payload.privateKey)
+  console.error(`SX_KEY set to ${subdomain}'s private key`)
+
+  console.error(`Account unlocked: ${subdomain}`)
+
+  return {
+    subdomain: payload.subdomain,
+    unlocked: true,
+    address: activeAccount.address,
+    publicKey: payload.publicKey,
+  }
+}
+
+export interface AccountLockResult {
+  locked: boolean
+  previousAccount?: string
+}
+
+/**
+ * Lock the active account, clearing session state.
+ *
+ * @param keychain - Keychain for storage
+ * @returns Lock result
+ */
+export async function accountLock(keychain: Keychain = defaultKeychain): Promise<AccountLockResult> {
+  const previousAccount = activeAccount?.subdomain
+
+  if (activeAccount) {
+    // Clear private key from memory
+    activeAccount.privateKey.fill(0)
+    activeAccount = null
+  }
+
+  // Clear active account marker
+  await keychain.remove(FAIRDROP_ACTIVE_KEY)
+
+  if (previousAccount) {
+    console.error(`Account locked: ${previousAccount}`)
+  }
+
+  return {
+    locked: true,
+    previousAccount,
+  }
+}
+
+export interface AccountStatusResult {
+  active: boolean
+  subdomain?: string
+  publicKey?: string
+  address?: string
+  ensName?: string
+  txHash?: string
+}
+
+/**
+ * Get status of an account (no unlock required).
+ *
+ * If subdomain is provided, shows public info for that account.
+ * If no subdomain, shows active account (if any) or first available account.
+ *
+ * @param subdomain - Optional subdomain to check
+ * @param keychain - Keychain for storage
+ * @returns Account status including ENS info
+ */
+export async function accountStatus(subdomain?: string, keychain: Keychain = defaultKeychain): Promise<AccountStatusResult> {
+  // Determine which account to show
+  let targetSubdomain = subdomain
+
+  if (!targetSubdomain) {
+    // Check for active (unlocked) account first
+    if (activeAccount) {
+      targetSubdomain = activeAccount.subdomain
+    } else {
+      // Fall back to first stored account
+      const accounts = await getStoredAccounts(keychain)
+      if (accounts.length === 0) {
+        return { active: false }
+      }
+      targetSubdomain = accounts[0]
+    }
+  }
+
+  // Check if account exists
+  const accounts = await getStoredAccounts(keychain)
+  if (!accounts.includes(targetSubdomain)) {
+    throw new CLIError('ERR_NOT_FOUND', `Account "${targetSubdomain}" not found`)
+  }
+
+  // Read public info from keychain (no decrypt needed)
+  const ensName = await keychain.get(`FAIRDROP_ENS_${targetSubdomain}`)
+  const txHash = await keychain.get(`FAIRDROP_TXHASH_${targetSubdomain}`)
+  const publicKey = await keychain.get(`FAIRDROP_PUBKEY_${targetSubdomain}`)
+  const address = await keychain.get(`FAIRDROP_ADDRESS_${targetSubdomain}`)
+
+  const isActive = activeAccount?.subdomain === targetSubdomain
+
+  return {
+    active: isActive,
+    subdomain: targetSubdomain,
+    publicKey: publicKey || undefined,
+    address: address || undefined,
+    ensName: ensName || undefined,
+    txHash: txHash || undefined,
+  }
+}
+
+export interface AccountListResult {
+  accounts: Array<{
+    subdomain: string
+    active: boolean
+  }>
+}
+
+/**
+ * List all stored accounts.
+ *
+ * @param keychain - Keychain for storage
+ * @returns List of accounts
+ */
+export async function accountList(keychain: Keychain = defaultKeychain): Promise<AccountListResult> {
+  const subdomains = await getStoredAccounts(keychain)
+  const activeSubdomain = activeAccount?.subdomain
+
+  return {
+    accounts: subdomains.map(subdomain => ({
+      subdomain,
+      active: subdomain === activeSubdomain,
+    })),
+  }
+}
+
+export interface AccountExportResult {
+  subdomain: string
+  keystore: string
+}
+
+/**
+ * Export an account's keystore for backup.
+ *
+ * @param subdomain - Account subdomain to export
+ * @param keychain - Keychain for storage
+ * @returns Keystore JSON
+ */
+export async function accountExport(
+  subdomain: string,
+  keychain: Keychain = defaultKeychain
+): Promise<AccountExportResult> {
+  const keystoreJson = await keychain.get(`${FAIRDROP_KEYSTORE_PREFIX}${subdomain}`)
+  if (!keystoreJson) {
+    throw new CLIError('ERR_NOT_FOUND', `Account "${subdomain}" not found`)
+  }
+
+  return {
+    subdomain,
+    keystore: keystoreJson,
+  }
+}
+
+export interface AccountDeleteResult {
+  deleted: boolean
+  subdomain: string
+}
+
+/**
+ * Delete an account.
+ *
+ * @param subdomain - Account subdomain to delete
+ * @param confirm - Must be true to confirm deletion
+ * @param keychain - Keychain for storage
+ * @returns Delete result
+ */
+export async function accountDelete(
+  subdomain: string,
+  confirm: boolean,
+  keychain: Keychain = defaultKeychain
+): Promise<AccountDeleteResult> {
+  if (!confirm) {
+    throw new CLIError('ERR_CONFIRMATION_REQUIRED', 'Must confirm deletion with --yes flag')
+  }
+
+  const keystoreJson = await keychain.get(`${FAIRDROP_KEYSTORE_PREFIX}${subdomain}`)
+  if (!keystoreJson) {
+    throw new CLIError('ERR_NOT_FOUND', `Account "${subdomain}" not found`)
+  }
+
+  // If this is the active account, lock it first
+  if (activeAccount?.subdomain === subdomain) {
+    await accountLock(keychain)
+  }
+
+  // Delete keystore and remove from list
+  await keychain.remove(`${FAIRDROP_KEYSTORE_PREFIX}${subdomain}`)
+  await removeStoredAccount(subdomain, keychain)
+
+  console.error(`Account deleted: ${subdomain}`)
+
+  return {
+    deleted: true,
+    subdomain,
+  }
+}
+
+/**
+ * Get the active account, throwing if none is unlocked.
+ * Used by other commands that require an active account.
+ */
+export function requireActiveAccount(): typeof activeAccount & object {
+  if (!activeAccount) {
+    throw new CLIError(
+      'ERR_MISSING_KEY',
+      'No active Fairdrop account',
+      'Use: ade account unlock <subdomain>'
+    )
+  }
+  return activeAccount
+}
+
+/**
+ * Get active account if available (non-throwing version).
+ */
+export function getActiveAccount(): typeof activeAccount {
+  return activeAccount
 }
 
 // ── Respond Command (Bounty Response) ──
@@ -1079,9 +1700,9 @@ export async function respond(opts: RespondOpts, keychain: Keychain = defaultKey
   console.error(`\nResponding to bounty with file: ${opts.file}`)
   await confirmAction('Create escrow response?', opts)
 
-  // 3. Run create flow
+  // 3. Run sell flow
   // Use bounty reward as price
-  const createResult = await create({
+  const createResult = await sell({
     file: opts.file,
     price: bounty.rewardAmount,
     title: `Response to: ${bounty.title}`,
@@ -1094,7 +1715,7 @@ export async function respond(opts: RespondOpts, keychain: Keychain = defaultKey
     throw new CLIError('ERR_INVALID_ARGUMENT', 'Cannot use dry-run mode with respond command')
   }
 
-  const escrowResult = createResult as CreateResult
+  const escrowResult = createResult as SellResult
 
   // 4. Link escrow to bounty via API
   console.error(`\nLinking escrow to bounty...`)
