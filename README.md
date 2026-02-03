@@ -151,6 +151,9 @@ The `ade create` command handles the complete seller workflow in a single step:
 ```bash
 # One command to encrypt, upload, and create escrow
 ade create --file ./data.csv --price 0.1 --yes
+
+# Dry run to validate without spending gas
+ade create --file ./data.csv --price 0.1 --dry-run
 ```
 
 This automatically:
@@ -158,6 +161,12 @@ This automatically:
 2. Uploads encrypted data to Swarm
 3. Creates escrow on-chain with key commitment
 4. Stores encryption keys in OS keychain
+
+**Options:**
+- `--file <path>` - File to encrypt and escrow (required)
+- `--price <eth>` - Price in ETH (required)
+- `--dry-run` - Validate everything without executing transactions
+- `--yes` - Skip confirmation prompts
 
 **Required secrets for `ade create`:**
 ```bash
@@ -178,6 +187,55 @@ ade set BEE_STAMP   # Postage batch ID (64 hex chars)
 }
 ```
 
+### Complete Buyer Flow
+
+The `ade buy` command handles the complete purchase workflow:
+
+```bash
+# Fund escrow, wait for key, download, and decrypt
+ade buy 42 --yes
+
+# Specify output file
+ade buy 42 --output ./purchased-data.csv --yes
+
+# Custom timeout for key reveal (default: 24 hours)
+ade buy 42 --wait-timeout 3600 --yes
+```
+
+This automatically:
+1. Reads escrow details from chain (price, content hash)
+2. Verifies sufficient balance (including gas)
+3. Funds the escrow
+4. Waits for seller to reveal key
+5. Downloads encrypted data from Swarm
+6. Verifies content hash matches on-chain
+7. Decrypts and saves to file
+
+**Required secrets for `ade buy`:**
+```bash
+ade set SX_KEY      # Your private key for transactions
+ade set BEE_API     # Bee node URL for downloading
+```
+
+### Bounty Response Flow
+
+The `ade respond` command creates an escrow in response to a bounty:
+
+```bash
+# Respond to a bounty with a deliverable file
+ade respond abc123 --file ./solution.zip --yes
+
+# Include a message for the bounty creator
+ade respond abc123 --file ./analysis.csv --message "Here's the data analysis" --yes
+```
+
+This automatically:
+1. Fetches bounty details (reward amount, requirements)
+2. Creates escrow using the bounty reward as price
+3. Links the escrow to the bounty via API
+
+**Required secrets:** Same as `ade create`
+
 ### Complete Seller Flow
 
 ```bash
@@ -191,7 +249,7 @@ ade create --file ./data.pdf --price 0.1 --yes
 # Outputs: escrowId, swarmRef, encryptionKey, etc.
 
 # 3. Share escrow ID with buyer
-# Buyer funds via: ade escrows fund 42 --yes
+# Buyer purchases via: ade buy 42 --yes
 
 # 4. Release key (after buyer funds)
 ade escrows commit-key 42 --yes
@@ -200,6 +258,37 @@ ade escrows reveal-key 42 --yes
 
 # 5. Claim payment (after 24h dispute window)
 ade escrows claim 42 --yes
+```
+
+### Escrow Status
+
+Check escrow state and local key availability:
+
+```bash
+ade escrows status 42
+```
+
+**Example output:**
+```json
+{
+  "escrowId": 42,
+  "state": "Funded",
+  "stateCode": 1,
+  "hasLocalKeys": true,
+  "hasSwarmRef": true,
+  "onChain": {
+    "seller": "0x...",
+    "buyer": "0x...",
+    "contentHash": "0x...",
+    "amount": "0.1 ETH",
+    "expiresAt": "2024-01-15T00:00:00.000Z"
+  },
+  "local": {
+    "encryptionKey": "(set)",
+    "salt": "(set)",
+    "swarmRef": "abc123..."
+  }
+}
 ```
 
 ### Manual Escrow Commands
@@ -212,6 +301,9 @@ ade escrows create --content-hash 0x... --price 0.1
 
 # Fund an escrow (as buyer)
 ade escrows fund <id>
+
+# Check escrow status
+ade escrows status <id>
 
 # Commit key release (as seller, reads keys from keychain)
 ade escrows commit-key <id>
@@ -227,6 +319,7 @@ When you create an escrow, keys are automatically stored in keychain:
 - `ESCROW_<id>_KEY` - The encryption key
 - `ESCROW_<id>_SALT` - The salt for commitment
 - `ESCROW_<id>_SWARM` - Swarm reference (for `ade create`)
+- `ESCROW_<id>_CONTENT_HASH` - Content hash for verification
 
 ### Supported Chains
 
