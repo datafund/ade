@@ -214,6 +214,56 @@ describe("routing", () => {
           flags: {},
         });
       });
+
+      it("should parse 'watch' as meta command", () => {
+        const result = parseArgs(["watch"]);
+        expect(result).toEqual({
+          type: "meta",
+          command: "watch",
+          args: [],
+          flags: {},
+        });
+      });
+
+      it("should parse 'watch' with flags", () => {
+        const result = parseArgs(["watch", "--yes", "--max-value", "0.1", "--once"]);
+        expect(result).toEqual({
+          type: "meta",
+          command: "watch",
+          args: [],
+          flags: { yes: true, "max-value": "0.1", once: true },
+        });
+      });
+
+      it("should parse 'scan-bounties' as meta command", () => {
+        const result = parseArgs(["scan-bounties", "--dir", "./data"]);
+        expect(result).toEqual({
+          type: "meta",
+          command: "scan-bounties",
+          args: [],
+          flags: { dir: "./data" },
+        });
+      });
+
+      it("should parse 'scan-bounties' with respond flags", () => {
+        const result = parseArgs(["scan-bounties", "--dir", "./data", "--respond", "--yes", "--max-value", "0.05"]);
+        expect(result).toEqual({
+          type: "meta",
+          command: "scan-bounties",
+          args: [],
+          flags: { dir: "./data", respond: true, yes: true, "max-value": "0.05" },
+        });
+      });
+
+      it("should parse 'sell' with --dir flag", () => {
+        const result = parseArgs(["sell", "--dir", "./data", "--price", "0.1", "--yes"]);
+        expect(result).toEqual({
+          type: "meta",
+          command: "sell",
+          args: [],
+          flags: { dir: "./data", price: "0.1", yes: true },
+        });
+      });
     });
 
     describe("help commands", () => {

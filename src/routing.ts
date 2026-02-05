@@ -11,7 +11,7 @@ export type ParsedCommand =
 
 const SECRETS_COMMANDS = ['set', 'get', 'rm', 'ls']
 const RESOURCES = ['skills', 'bounties', 'agents', 'escrows', 'wallets', 'config', 'account']
-const META_COMMANDS = ['stats', 'schema', 'version', 'update', 'sell', 'create', 'buy', 'respond']
+const META_COMMANDS = ['stats', 'schema', 'version', 'update', 'sell', 'create', 'buy', 'respond', 'watch', 'scan-bounties']
 
 export function parseArgs(argv: string[]): ParsedCommand {
   if (argv.length === 0) {

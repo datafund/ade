@@ -42,7 +42,7 @@ export const CHAINS: Record<string, ChainConfig> = {
     explorer: 'https://basescan.org',
     defaultRpc: 'https://mainnet.base.org',
     contracts: {
-      dataEscrow: getAddress('0xDd4396d4F28d2b513175ae17dE11e56a898d19c3'),
+      dataEscrow: getAddress('0x69Aa385686AEdA505013a775ddE7A59d045cb30d'),
       ...ERC8004_MAINNET,
       usdc: getAddress('0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'),
       usdt: getAddress('0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2'),

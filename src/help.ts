@@ -28,7 +28,8 @@ Secret Management:
   ls                   List all secret keys
 
 Data Escrow (Seller Flow):
-  sell                 Sell data via escrow (encrypt + upload + escrow)
+  sell --file <f>      Sell single file via escrow
+  sell --dir <d>       Batch sell files from directory
   escrows              Manage data escrows
 
 Data Escrow (Buyer Flow):
@@ -36,6 +37,10 @@ Data Escrow (Buyer Flow):
 
 Bounty Response:
   respond <id>         Respond to bounty with deliverable
+
+Automation:
+  watch                Watch escrows, auto-complete lifecycle
+  scan-bounties        Match local files to open bounties
 
 Account Management:
   account              Manage Fairdrop accounts for ECDH key exchange
@@ -93,11 +98,19 @@ export function showResourceHelp(resource: string): void {
     showRespondHelp()
     return
   }
+  if (resource === 'watch') {
+    showWatchHelp()
+    return
+  }
+  if (resource === 'scan-bounties') {
+    showScanBountiesHelp()
+    return
+  }
 
   if (!RESOURCES.includes(resource as Resource)) {
     console.log(`Unknown resource: ${resource}
 
-Available resources: ${RESOURCES.join(', ')}, sell, buy, respond
+Available resources: ${RESOURCES.join(', ')}, sell, buy, respond, watch, scan-bounties
 
 Run 'ade help' for overview.`)
     return
@@ -126,6 +139,7 @@ function showSellHelp(): void {
 
 USAGE:
   ade sell --file <path> --price <eth> [options]
+  ade sell --dir <path> --price <eth> [--max-value <eth>] [options]
 
 DESCRIPTION:
   The unified seller command that handles the complete escrow creation flow:
@@ -133,6 +147,7 @@ DESCRIPTION:
   2. Uploads encrypted data to Swarm
   3. Creates escrow on-chain with key commitment
   4. Stores encryption keys in OS keychain
+  5. Publishes to marketplace
 
 REQUIRED:
   --file <path>      File to encrypt and escrow (max 50MB)
@@ -141,8 +156,16 @@ REQUIRED:
 OPTIONS:
   --title <text>     Title for the data
   --description <text>  Description
+  --category <cat>   Marketplace category
+  --tags <t1,t2>     Comma-separated tags
   --dry-run          Validate everything without executing (no uploads, no tx)
   --yes              Skip confirmation prompt
+
+BATCH OPTIONS (--dir mode):
+  --dir <path>       Batch sell: encrypt and escrow all files in directory
+  --max-value <eth>  Max price per file (required with --dir --yes)
+  --max-files <n>    Max files to process (default: 50)
+  --skip-existing    Skip files already listed on marketplace
 
 REQUIRED SECRETS (set via 'ade set'):
   SX_KEY            Private key for transactions
@@ -150,7 +173,7 @@ REQUIRED SECRETS (set via 'ade set'):
   BEE_STAMP         Postage batch ID (64 hex chars)
 
 EXAMPLES:
-  # Sell data from CSV file
+  # Sell single file
   ade sell --file ./data.csv --price 0.01
 
   # Dry run to validate without spending gas
@@ -158,6 +181,20 @@ EXAMPLES:
 
   # Sell with metadata and skip confirmation
   ade sell --file ./report.pdf --price 0.1 --title "Q4 Report" --yes
+
+  # Batch sell a directory
+  ade sell --dir ./data/ --price 0.01 --yes --max-value 0.1
+
+  # Batch sell with skip existing
+  ade sell --dir ./data/ --price 0.01 --skip-existing --yes --max-value 0.1
+
+  # Dry run batch
+  ade sell --dir ./data/ --price 0.01 --dry-run
+
+NOTES:
+  --file and --dir are mutually exclusive.
+  In batch mode, filenames are used as titles.
+  With --yes, encryption keys are stored in keychain and omitted from output.
 
 OUTPUT:
   Returns escrow ID, transaction hash, Swarm reference, and encryption keys.
@@ -174,6 +211,102 @@ NEXT STEPS:
     ade escrows reveal-key <id> --yes
     # After 24h dispute window
     ade escrows claim <id> --yes`)
+}
+
+function showWatchHelp(): void {
+  console.log(`ade watch - Watch escrows and auto-complete lifecycle
+
+Usage: ade watch [options]
+
+Watch escrows and auto-complete lifecycle (commit, reveal, claim, download).
+Outputs machine-readable NDJSON events on stdout.
+
+Modes:
+  ade watch [--yes]             Daemon mode (long-running, NDJSON on stdout)
+  ade watch --once              Single poll cycle then exit
+  ade watch --status            Query running instance status
+  ade watch --reset-state       Reset corrupted state file
+
+Daemon Options:
+  --yes                   Non-interactive mode (requires --max-value)
+  --dry-run               Show actions without executing transactions
+  --seller-only           Only handle seller duties (commit, reveal, claim)
+  --buyer-only            Only handle buyer duties (download, decrypt)
+  --interval <seconds>    Poll interval (default: 20)
+  --download-dir <path>   Directory for buyer downloads (default: cwd)
+  --escrow-ids <ids>      Comma-separated escrow IDs to watch
+  --password-stdin        Read Fairdrop account password from stdin for ECDH
+
+Spending Limits:
+  --max-value <ETH>       Max single escrow value (required with --yes, max 10 ETH)
+  --max-daily <ETH>       Max daily cumulative value (resets UTC midnight)
+  --max-cumulative <ETH>  Lifetime cumulative cap (never resets, persisted in keychain)
+  --max-tx-per-cycle <n>  Max transactions per poll cycle (default: 10)
+
+Output:
+  --quiet                 Suppress stderr logs (NDJSON only on stdout)
+  --verbose               Debug-level stderr logs
+
+NDJSON Protocol:
+  Stdout emits one JSON object per line. Events: hello, heartbeat, cycle_start,
+  escrow_found, key_committed, key_revealed, download_start, download_complete,
+  claim_executed, error, spending_limit, cycle_end, shutdown.
+
+Required Secrets:
+  SX_KEY                  Ethereum private key (ade set SX_KEY)
+
+Examples:
+  ade watch --yes --max-value 0.1 --max-daily 1.0
+  ade watch --once --dry-run
+  ade watch --status
+
+Exit Codes:
+  0  Clean shutdown       5  Spending limit exceeded
+  1  Invalid arguments    7  Another instance running
+  2  Missing credentials  8  Corrupted state file
+  3  Chain error`)
+}
+
+function showScanBountiesHelp(): void {
+  console.log(`ade scan-bounties - Match local files against open bounties
+
+Usage: ade scan-bounties --dir <path> [options]
+
+Match local files against open bounties on the marketplace.
+
+Options:
+  --dir <path>            Directory to scan (required)
+  --respond               Auto-respond to best matches (creates escrows)
+  --dry-run               With --respond: show what would happen
+  --yes                   Non-interactive (requires --max-value with --respond)
+  --min-score <0-1>       Minimum match score (default: 0, forced 0.5 with --respond --yes)
+  --max-responses <n>     Max bounties to respond to (default: 3, max: 10)
+  --max-value <ETH>       Max bounty reward value per response (required with --respond --yes)
+  --exclude <patterns>    Comma-separated glob patterns to exclude (added to defaults)
+
+Default Excludes:
+  *.env, *.pem, *.key, *.p12, *.pfx, .ssh/*, .gnupg/*, .config/*,
+  id_rsa*, *.sqlite, *.db, *.log, node_modules/*
+
+Scoring:
+  Simple keyword overlap between filename terms and bounty terms.
+  Score = matched_terms / total_bounty_terms. Agents can pipe JSON output
+  through their own LLM-based relevance scoring for better results.
+
+Auth Escalation:
+  Base auth is "none" (read-only scan). When --respond is set, auth escalates
+  to "chain" (requires SX_KEY for escrow creation).
+
+Examples:
+  ade scan-bounties --dir ./knowledge/
+  ade scan-bounties --dir ./data/ --respond --dry-run
+  ade scan-bounties --dir ./data/ --respond --yes --max-value 0.05 --max-responses 3
+  ade scan-bounties --min-score 0.5 --dir ./data/
+
+Exit Codes:
+  0  Success (even zero matches)
+  1  Configuration error
+  6  Partial response failures (some --respond calls failed)`)
 }
 
 function showBuyHelp(): void {
