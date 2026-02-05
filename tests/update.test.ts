@@ -8,9 +8,9 @@ describe("update", () => {
       expect(version).toMatch(/^\d+\.\d+\.\d+$/);
     });
 
-    it("should return 0.1.0 as initial version", () => {
+    it("should return 0.2.0 as current version", () => {
       const version = getVersion();
-      expect(version).toBe("0.1.0");
+      expect(version).toBe("0.2.0");
     });
   });
 

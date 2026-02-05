@@ -5,8 +5,12 @@
 import { createPublicClient, createWalletClient, http, parseEther, formatEther, keccak256, concat, toHex, type PublicClient, type WalletClient, type Chain, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { base, baseSepolia } from 'viem/chains'
+import * as secp256k1 from '@noble/secp256k1'
 import { randomBytes } from 'crypto'
 import { readFile, stat, writeFile } from 'fs/promises'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, readdirSync, lstatSync, realpathSync } from 'fs'
+import { basename, extname, join, dirname } from 'path'
+import { homedir } from 'os'
 import { apiFetch, apiPost, getBaseUrl } from './api'
 import { CLIError } from './errors'
 import { DataEscrowABI } from './abi/DataEscrow'
@@ -88,7 +92,7 @@ function validateBytes32(value: string, label: string): `0x${string}` {
   return normalized as `0x${string}`
 }
 
-async function requireKey(keychain: Keychain = defaultKeychain): Promise<`0x${string}`> {
+export async function requireKey(keychain: Keychain = defaultKeychain): Promise<`0x${string}`> {
   // Check keychain first
   const key = await keychain.get('SX_KEY')
   // Fall back to env var for CI/scripting
@@ -106,17 +110,30 @@ async function requireKey(keychain: Keychain = defaultKeychain): Promise<`0x${st
   return normalized
 }
 
-async function requireRpc(keychain: Keychain = defaultKeychain): Promise<string> {
-  // Check keychain first
-  const rpc = await keychain.get('SX_RPC')
-  // Fall back to env var, then default
-  const envRpc = process.env.SX_RPC?.trim()
+function validateRpcUrl(url: string): void {
+  try {
+    const parsed = new URL(url)
+    const isLocalhost = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '::1'
+    if (parsed.protocol !== 'https:' && !isLocalhost) {
+      throw new CLIError('ERR_INVALID_ARGUMENT',
+        `RPC URL must use HTTPS: ${url}`,
+        'Set a secure URL: ade set SX_RPC https://mainnet.base.org')
+    }
+  } catch (err) {
+    if (err instanceof CLIError) throw err
+    throw new CLIError('ERR_INVALID_ARGUMENT', `Invalid RPC URL: ${url}`)
+  }
+}
 
+async function requireRpc(keychain: Keychain = defaultKeychain): Promise<string> {
+  const rpc = await keychain.get('SX_RPC')
+  const envRpc = process.env.SX_RPC?.trim()
   const finalRpc = rpc || envRpc || DEFAULT_RPC
+  validateRpcUrl(finalRpc)
   return finalRpc
 }
 
-async function getChainClient(keychain: Keychain = defaultKeychain): Promise<{
+export async function getChainClient(keychain: Keychain = defaultKeychain): Promise<{
   pub: PublicClient
   wallet: WalletClient
   address: `0x${string}`
@@ -178,6 +195,34 @@ async function confirmAction(message: string, opts: { yes?: boolean }): Promise<
     rl.close()
   }
 }
+
+/**
+ * Read a single line from stdin, then detach stdin so it doesn't block the process.
+ * Used by watch daemon for --password-stdin.
+ */
+export async function readLineFromStdin(timeoutMs = 30_000): Promise<string> {
+  const { createInterface } = await import('readline')
+  const rl = createInterface({ input: process.stdin, output: process.stderr })
+  let timerId: ReturnType<typeof setTimeout> | undefined
+  try {
+    const line = await Promise.race([
+      new Promise<string>(resolve => rl.question('', resolve)),
+      new Promise<never>((_, reject) => {
+        timerId = setTimeout(() => reject(new CLIError('ERR_STDIN_TIMEOUT',
+          `stdin read timed out after ${timeoutMs / 1000}s`,
+          'Pipe password via: echo "pass" | ade watch --password-stdin')), timeoutMs)
+      }),
+    ])
+    return line.trim()
+  } finally {
+    if (timerId !== undefined) clearTimeout(timerId)
+    rl.close()
+    process.stdin.pause()
+    process.stdin.unref()
+  }
+}
+
+export const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
 interface ListOpts { limit?: string; offset?: string }
 function listParams(opts: ListOpts): string {
@@ -346,7 +391,7 @@ export async function escrowsCreate(opts: { contentHash: string; price: string; 
 
   // Store keys in keychain
   try {
-    await storeEscrowKeys(escrowId, { encryptionKey, salt }, keychain)
+    await storeEscrowKeys(escrowId, { encryptionKey, salt, contentHash: opts.contentHash, seller: address }, keychain)
     console.error(`\nKeys stored in keychain: ESCROW_${escrowId}_KEY, ESCROW_${escrowId}_SALT`)
   } catch (err) {
     console.error(`\nWarning: Could not store keys in keychain: ${(err as Error).message}`)
@@ -395,7 +440,7 @@ export async function escrowsFund(id: string, opts: { yes?: boolean }, keychain:
   return formatTxResult(hash, receipt, chainConfig)
 }
 
-export async function escrowsCommitKey(id: string, opts: { key?: string; salt?: string; yes?: boolean }, keychain: Keychain = defaultKeychain): Promise<TxResult> {
+export async function escrowsCommitKey(id: string, opts: { key?: string; salt?: string; buyerPubkey?: string; yes?: boolean }, keychain: Keychain = defaultKeychain): Promise<TxResult> {
   requireConfirmation(opts)
   const { pub, wallet, address, chainConfig } = await getChainClient(keychain)
   const escrowId = parseBigInt(id, 'escrow ID')
@@ -412,8 +457,34 @@ export async function escrowsCommitKey(id: string, opts: { key?: string; salt?: 
   const validatedKey = validateBytes32(keys.encryptionKey, 'Encryption key')
   const validatedSalt = validateBytes32(keys.salt, 'Salt')
 
-  // Compute commitment = keccak256(key || salt) — must match what was used at creation
-  const commitment = keccak256(concat([validatedKey, validatedSalt]))
+  // Compute commitment — ECDH-encrypt first if buyer pubkey provided
+  let commitment: Hex
+  if (opts.buyerPubkey) {
+    const buyerPubkeyBytes = hexToBytes(opts.buyerPubkey)
+    if (buyerPubkeyBytes.length !== 33 && buyerPubkeyBytes.length !== 65) {
+      throw new CLIError('ERR_INVALID_ARGUMENT',
+        `Invalid buyer pubkey length: ${buyerPubkeyBytes.length} bytes (expected 33 compressed or 65 uncompressed)`,
+        'Use the full secp256k1 public key from the buyer\'s Fairdrop account')
+    }
+    try {
+      secp256k1.Point.fromBytes(buyerPubkeyBytes)
+    } catch {
+      throw new CLIError('ERR_INVALID_ARGUMENT',
+        'Buyer public key is not a valid point on the secp256k1 curve',
+        'Verify the buyer\'s public key is correct')
+    }
+    const keyBytes = hexToBytes(validatedKey)
+    const encrypted = encryptKeyForBuyer(keyBytes, buyerPubkeyBytes)
+    const serialized = serializeEncryptedKey(encrypted)
+    const serializedHex = toHex(serialized)
+    commitment = keccak256(concat([serializedHex, validatedSalt]))
+    // Store for reveal phase
+    await keychain.set(`ESCROW_${id}_ENCRYPTED_KEY`, serializedHex)
+    await keychain.set(`ESCROW_${id}_BUYER_PUBKEY`, opts.buyerPubkey)
+    console.error(`ECDH: Key encrypted for buyer, commitment uses encrypted form`)
+  } else {
+    commitment = keccak256(concat([validatedKey, validatedSalt]))
+  }
 
   logChainInfo({ chainConfig, address, action: 'Commit key for', escrowId: id })
   console.error(`Commitment: ${commitment}`)
@@ -459,9 +530,27 @@ export async function escrowsRevealKey(id: string, opts: { key?: string; salt?: 
     throw new CLIError('ERR_INVALID_ARGUMENT', 'Escrow has no buyer yet', 'Wait for a buyer to fund the escrow')
   }
 
-  // Parse buyer's public key if provided
-  let buyerPubkey: Uint8Array | null = null
-  if (opts.buyerPubkey) {
+  // Check for stored ECDH-encrypted key from commit phase
+  const storedEncryptedKey = await keychain.get(`ESCROW_${id}_ENCRYPTED_KEY`)
+
+  let keyToReveal: `0x${string}`
+  let ecdhEncrypted = false
+
+  if (storedEncryptedKey) {
+    // ECDH key was committed — MUST use stored version
+    if (opts.buyerPubkey) {
+      const storedBuyerPubkey = await keychain.get(`ESCROW_${id}_BUYER_PUBKEY`)
+      if (storedBuyerPubkey && storedBuyerPubkey !== opts.buyerPubkey) {
+        console.error(`Warning: Ignoring --buyer-pubkey. Key was committed for buyer ${storedBuyerPubkey.slice(0, 20)}...`)
+      }
+    }
+    keyToReveal = storedEncryptedKey as `0x${string}`
+    ecdhEncrypted = true
+    console.error(`Using stored ECDH-encrypted key from commit phase`)
+  } else if (opts.buyerPubkey) {
+    // No stored key — encrypt now (only works if raw key was committed with matching hash)
+    console.error(`Warning: No stored ECDH key. Encrypting now — may fail if commitment was for raw key.`)
+    let buyerPubkey: Uint8Array
     try {
       buyerPubkey = hexToBytes(opts.buyerPubkey)
       if (buyerPubkey.length !== 33 && buyerPubkey.length !== 65) {
@@ -474,18 +563,10 @@ export async function escrowsRevealKey(id: string, opts: { key?: string; salt?: 
         'Use compressed (33 bytes) or uncompressed (65 bytes) secp256k1 public key in hex'
       )
     }
-  }
-
-  let keyToReveal: `0x${string}`
-  let ecdhEncrypted = false
-
-  if (buyerPubkey) {
-    // ECDH path: encrypt AES key for buyer
-    console.error(`Using ECDH encryption for buyer's public key`)
     const keyBytes = hexToBytes(validatedKey)
     const encrypted = encryptKeyForBuyer(keyBytes, buyerPubkey)
     const serialized = serializeEncryptedKey(encrypted)
-    keyToReveal = ('0x' + Array.from(serialized, b => b.toString(16).padStart(2, '0')).join('')) as `0x${string}`
+    keyToReveal = toHex(serialized)
     ecdhEncrypted = true
   } else {
     // Legacy path: reveal raw key
@@ -591,11 +672,38 @@ export interface SellResult {
   encryptedSize: number
 }
 
+export interface SellResultMasked {
+  escrowId: number
+  txHash: Hex
+  contentHash: Hex
+  swarmRef: string
+  keysStored: true
+  keyCommitment: Hex
+  chain: string
+  chainId: number
+  explorer: string
+  fileSize: number
+  encryptedSize: number
+}
+
 export interface DryRunResult {
   dryRun: true
   contentHash: Hex
   encryptionKey: Hex
   salt: Hex
+  keyCommitment: Hex
+  fileSize: number
+  encryptedSize: number
+  estimatedGas: string
+  chain: string
+  chainId: number
+  stampValid: boolean
+}
+
+export interface DryRunResultMasked {
+  dryRun: true
+  keysStored: true
+  contentHash: Hex
   keyCommitment: Hex
   fileSize: number
   encryptedSize: number
@@ -614,6 +722,10 @@ export interface SellOpts {
   title?: string
   /** Optional description */
   description?: string
+  /** Marketplace category */
+  category?: string
+  /** Marketplace tags */
+  tags?: string[]
   /** Skip confirmation prompt */
   yes?: boolean
   /** Dry run mode - validate without executing */
@@ -648,7 +760,7 @@ export interface SellOpts {
  * ade sell --file ./data.csv --price 0.1 --dry-run
  * ```
  */
-export async function sell(opts: SellOpts, keychain: Keychain = defaultKeychain): Promise<SellResult | DryRunResult> {
+export async function sell(opts: SellOpts, keychain: Keychain = defaultKeychain): Promise<SellResult | SellResultMasked | DryRunResult | DryRunResultMasked> {
   if (!opts.dryRun) {
     requireConfirmation(opts)
   }
@@ -746,11 +858,9 @@ export async function sell(opts: SellOpts, keychain: Keychain = defaultKeychain)
   // If dry-run, return validation results without executing
   if (opts.dryRun) {
     console.error(`\nDry run complete. No transactions executed.`)
-    return {
-      dryRun: true,
+    const baseDryRun = {
+      dryRun: true as const,
       contentHash,
-      encryptionKey: encryptionKeyHex,
-      salt: saltHex,
       keyCommitment,
       fileSize,
       encryptedSize: encryptedData.length,
@@ -758,6 +868,11 @@ export async function sell(opts: SellOpts, keychain: Keychain = defaultKeychain)
       chain: chainConfig.name,
       chainId: chainConfig.chainId,
       stampValid: true,
+    }
+    if (opts.yes) {
+      return { ...baseDryRun, keysStored: true as const }
+    } else {
+      return { ...baseDryRun, keysStored: false as const, encryptionKey: encryptionKeyHex, salt: saltHex }
     }
   }
 
@@ -801,7 +916,7 @@ export async function sell(opts: SellOpts, keychain: Keychain = defaultKeychain)
 
   // 10. Store keys in keychain
   try {
-    await storeEscrowKeys(escrowId, { encryptionKey: encryptionKeyHex, salt: saltHex }, keychain)
+    await storeEscrowKeys(escrowId, { encryptionKey: encryptionKeyHex, salt: saltHex, encryptedDataRef: swarmRef, contentHash, seller: address }, keychain)
     // Also store Swarm reference and content hash
     await keychain.set(`ESCROW_${escrowId}_SWARM`, swarmRef)
     await keychain.set(`ESCROW_${escrowId}_CONTENT_HASH`, contentHash)
@@ -815,19 +930,70 @@ export async function sell(opts: SellOpts, keychain: Keychain = defaultKeychain)
     console.error('IMPORTANT: Save the encryption key, salt, and Swarm reference from the output!')
   }
 
-  return {
+  // 11. Publish to marketplace (non-fatal)
+  try {
+    const sxKey = await requireKey(keychain)
+    await apiPost('/skills', {
+      seller: address,
+      title: opts.title || basename(opts.file, extname(opts.file)),
+      description: opts.description || `Data file: ${basename(opts.file)}`,
+      category: opts.category || 'other',
+      price: parseEther(opts.price).toString(),
+      priceToken: 'ETH',
+      escrowId,
+      contentHash,
+      encryptedDataRef: swarmRef,
+      tags: opts.tags || [],
+    }, sxKey)
+    console.error(`Published to marketplace`)
+  } catch (err) {
+    console.error(`Warning: Marketplace publish failed: ${(err as Error).message}`)
+    // Store for retry (max 100 entries, FIFO eviction)
+    const pendingPath = join(homedir(), '.config', 'ade', 'pending-publish.json')
+    try {
+      mkdirSync(dirname(pendingPath), { recursive: true, mode: 0o700 })
+      let pending: Array<{ escrowId: number; contentHash: string; swarmRef: string; title?: string; timestamp: string }> = []
+      if (existsSync(pendingPath)) {
+        try {
+          const raw = readFileSync(pendingPath, 'utf-8')
+          if (raw.length > 102400) throw new Error('File too large')
+          const parsed = JSON.parse(raw)
+          if (Array.isArray(parsed)) {
+            pending = parsed.filter((e: unknown) =>
+              e && typeof e === 'object' &&
+              typeof (e as Record<string, unknown>).escrowId === 'number' &&
+              typeof (e as Record<string, unknown>).contentHash === 'string' &&
+              ((e as Record<string, unknown>).contentHash as string).startsWith('0x') &&
+              typeof (e as Record<string, unknown>).swarmRef === 'string' &&
+              typeof (e as Record<string, unknown>).timestamp === 'string'
+            )
+          }
+        } catch { pending = [] }
+      }
+      pending.push({ escrowId, contentHash, swarmRef, title: opts.title, timestamp: new Date().toISOString() })
+      if (pending.length > 100) pending.splice(0, pending.length - 100)
+      const tmpPath = pendingPath + '.tmp'
+      writeFileSync(tmpPath, JSON.stringify(pending, null, 2), { mode: 0o600 })
+      renameSync(tmpPath, pendingPath)
+    } catch { /* non-fatal */ }
+  }
+
+  const baseResult = {
     escrowId,
     txHash: hash,
     contentHash,
     swarmRef,
-    encryptionKey: encryptionKeyHex,
-    salt: saltHex,
     keyCommitment,
     chain: chainConfig.name,
     chainId: chainConfig.chainId,
     explorer: txLink(hash, chainConfig.explorer),
     fileSize,
     encryptedSize: encryptedData.length,
+  }
+  if (opts.yes) {
+    return { ...baseResult, keysStored: true as const }
+  } else {
+    return { ...baseResult, keysStored: false as const, encryptionKey: encryptionKeyHex, salt: saltHex }
   }
 }
 
@@ -837,6 +1003,164 @@ export const create = sell
 // Type aliases for backward compatibility
 export type CreateOpts = SellOpts
 export type CreateResult = SellResult
+
+// ── Batch Sell ──
+
+export interface BatchSellOpts {
+  dir: string
+  price: string
+  category?: string
+  tags?: string[]
+  maxFiles?: number
+  maxValue?: string
+  skipExisting?: boolean
+  dryRun?: boolean
+  yes?: boolean
+}
+
+export interface BatchSellResultItem {
+  file: string
+  escrowId?: number
+  txHash?: string
+  error?: string
+  status: 'ok' | 'failed' | 'skipped'
+}
+
+export interface BatchSellResult {
+  total: number
+  success: number
+  failed: number
+  skipped: number
+  dryRun?: true
+  results: BatchSellResultItem[]
+  partialError?: {
+    code: 'ERR_BATCH_PARTIAL'
+    message: string
+    suggestion: string
+  }
+}
+
+export async function batchSell(
+  opts: BatchSellOpts,
+  keychain: Keychain = defaultKeychain
+): Promise<BatchSellResult> {
+  if (opts.yes && !opts.maxValue) {
+    throw new CLIError('ERR_INVALID_ARGUMENT',
+      '--max-value is required when using --dir --yes',
+      'Set maximum price per file: ade sell --dir ./data --price 0.1 --yes --max-value 0.1')
+  }
+  if (opts.maxValue) {
+    const price = parseEther(opts.price)
+    const maxValue = parseEther(opts.maxValue)
+    if (price > maxValue) {
+      throw new CLIError('ERR_SPENDING_LIMIT',
+        `Price ${opts.price} ETH exceeds --max-value ${opts.maxValue} ETH`)
+    }
+  }
+
+  const maxFiles = opts.maxFiles || 50
+  const dir = realpathSync(opts.dir)
+
+  // Discover files
+  const entries = readdirSync(dir, { withFileTypes: true })
+  const files: string[] = []
+  for (const entry of entries) {
+    if (entry.isDirectory()) continue
+    if (entry.name.startsWith('.')) continue
+    const filePath = join(dir, entry.name)
+    const fstat = lstatSync(filePath)
+    if (fstat.isSymbolicLink()) continue
+    if (fstat.size > MAX_FILE_SIZE) {
+      console.error(`Skipping ${entry.name}: exceeds ${MAX_FILE_SIZE} bytes`)
+      continue
+    }
+    const realPath = realpathSync(filePath)
+    if (!realPath.startsWith(dir)) continue
+    files.push(filePath)
+  }
+
+  if (files.length === 0) {
+    return { total: 0, success: 0, failed: 0, skipped: 0, results: [] }
+  }
+  if (files.length > maxFiles) {
+    files.length = maxFiles
+    console.error(`Truncated to --max-files=${maxFiles}`)
+  }
+
+  // Get seller address for --skip-existing marketplace check
+  const address = opts.skipExisting ? (await getChainClient(keychain)).address : undefined
+
+  // Sequential execution (parallel would cause nonce conflicts)
+  const results: BatchSellResultItem[] = []
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]
+    if (i > 0) await sleep(500)
+
+    // --skip-existing: check marketplace by seller + title
+    if (opts.skipExisting && address) {
+      const title = basename(file, extname(file))
+      try {
+        const existing = await apiFetch<{ items: Array<{ title: string }> }>(
+          `/skills?seller=${encodeURIComponent(address)}&title=${encodeURIComponent(title)}&limit=1`
+        )
+        if (existing.items && existing.items.length > 0) {
+          results.push({ file: basename(file), status: 'skipped' })
+          continue
+        }
+      } catch { /* API down: proceed with sell attempt */ }
+    }
+
+    try {
+      const result = await sell({
+        file,
+        price: opts.price,
+        title: basename(file, extname(file)),
+        category: opts.category,
+        tags: opts.tags,
+        yes: opts.yes,
+        dryRun: opts.dryRun,
+      }, keychain)
+      if ('dryRun' in result && result.dryRun) {
+        results.push({ file: basename(file), status: 'ok' })
+      } else {
+        const sellResult = result as SellResultMasked | SellResult
+        results.push({ file: basename(file), escrowId: sellResult.escrowId, txHash: sellResult.txHash, status: 'ok' })
+      }
+    } catch (err) {
+      const msg = err instanceof CLIError ? err.message : (err as Error).message
+      results.push({ file: basename(file), error: msg, status: 'failed' })
+      if (err instanceof CLIError && err.code === 'ERR_INSUFFICIENT_BALANCE') {
+        console.error('Aborting batch: insufficient balance')
+        break
+      }
+      if (err instanceof CLIError && err.code === 'ERR_RATE_LIMITED') {
+        const rateLimitCount = results.filter(r => r.status === 'failed' && r.error?.includes('rate limit')).length
+        const backoff = Math.min(30_000, 2000 * Math.pow(2, Math.max(0, rateLimitCount - 1)))
+        console.error(`Rate limited, backing off ${backoff / 1000}s`)
+        await sleep(backoff)
+      }
+    }
+  }
+
+  const success = results.filter(r => r.status === 'ok').length
+  const failed = results.filter(r => r.status === 'failed').length
+  const skipped = results.filter(r => r.status === 'skipped').length
+
+  const batchResult: BatchSellResult = {
+    total: results.length, success, failed, skipped, results,
+    ...(opts.dryRun && { dryRun: true as const }),
+  }
+
+  if (failed > 0 && success > 0) {
+    batchResult.partialError = {
+      code: 'ERR_BATCH_PARTIAL' as const,
+      message: `${failed} of ${results.length} files failed`,
+      suggestion: 'Re-run with --skip-existing to retry failed files only',
+    }
+  }
+
+  return batchResult
+}
 
 /**
  * Format bytes as human-readable string.

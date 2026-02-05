@@ -6,6 +6,8 @@ import { detectFormat, output } from "./format";
 import { CLIError } from "./errors";
 import { SCHEMA } from "./schema";
 import * as commands from "./commands";
+import { watch, watchStatus, watchResetState } from "./watch";
+import { scanBounties } from "./scan";
 
 const args = process.argv.slice(2);
 const parsed = parseArgs(args);
@@ -272,12 +274,13 @@ async function handleResource(
           break;
         case "commit-key":
           if (!cmdArgs[0]) {
-            console.error("Usage: ade escrows commit-key <id> [--yes]");
+            console.error("Usage: ade escrows commit-key <id> [--buyer-pubkey <hex>] [--yes]");
             process.exit(1);
           }
           result = await commands.escrowsCommitKey(cmdArgs[0], {
             key: flags.key as string,
             salt: flags.salt as string,
+            buyerPubkey: flags['buyer-pubkey'] as string,
             yes: flags.yes === true,
           });
           break;
@@ -427,8 +430,36 @@ async function handleMeta(
     case "sell":
     case "create": {
       // Unified escrow creation command ('create' is deprecated alias for 'sell')
+      if (flags.file && flags.dir) {
+        console.error("Error: --file and --dir are mutually exclusive");
+        process.exit(1);
+      }
+      if (flags.dir) {
+        // Batch sell mode
+        if (!flags.price) {
+          console.error("Usage: ade sell --dir <path> --price <eth> [--category <cat>] [--tags <a,b>] [--max-files <n>] [--max-value <eth>] [--skip-existing] [--dry-run] [--yes]");
+          process.exit(1);
+        }
+        const result = await commands.batchSell({
+          dir: flags.dir as string,
+          price: flags.price as string,
+          category: flags.category as string,
+          tags: (flags.tags as string)?.split(','),
+          maxFiles: flags["max-files"] ? parseInt(flags["max-files"] as string, 10) : undefined,
+          maxValue: flags["max-value"] as string,
+          skipExisting: flags["skip-existing"] === true,
+          dryRun: flags["dry-run"] === true,
+          yes: flags.yes === true,
+        });
+        output(result, format);
+        if (result.partialError) {
+          process.exit(6);
+        }
+        break;
+      }
+      // Single file sell mode
       if (!flags.file || !flags.price) {
-        console.error("Usage: ade sell --file <path> --price <eth> [--title <text>] [--description <text>] [--dry-run] [--yes]");
+        console.error("Usage: ade sell --file <path> --price <eth> [--title <text>] [--description <text>] [--category <cat>] [--tags <a,b>] [--dry-run] [--yes]");
         process.exit(1);
       }
       const result = await commands.sell({
@@ -436,6 +467,8 @@ async function handleMeta(
         price: flags.price as string,
         title: flags.title as string,
         description: flags.description as string,
+        category: flags.category as string,
+        tags: (flags.tags as string)?.split(','),
         yes: flags.yes === true,
         dryRun: flags["dry-run"] === true,
       });
@@ -468,6 +501,59 @@ async function handleMeta(
         file: flags.file as string,
         message: flags.message as string,
         yes: flags.yes === true,
+      });
+      output(result, format);
+      break;
+    }
+    case "watch": {
+      if (flags.status) {
+        const result = await watchStatus();
+        output(result, format);
+        break;
+      }
+      if (flags["reset-state"]) {
+        await watchResetState();
+        console.log("Watch state reset.");
+        break;
+      }
+      await watch({
+        yes: flags.yes === true,
+        dryRun: flags["dry-run"] === true,
+        once: flags.once === true,
+        sellerOnly: flags["seller-only"] === true,
+        buyerOnly: flags["buyer-only"] === true,
+        interval: flags.interval ? parseInt(flags.interval as string, 10) : undefined,
+        downloadDir: flags["download-dir"] as string,
+        escrowIds: (flags["escrow-ids"] as string)?.split(',').map(s => parseInt(s.trim(), 10)),
+        maxValue: flags["max-value"] as string,
+        maxDaily: flags["max-daily"] as string,
+        maxCumulative: flags["max-cumulative"] as string,
+        maxTxPerCycle: flags["max-tx-per-cycle"] ? parseInt(flags["max-tx-per-cycle"] as string, 10) : undefined,
+        quiet: flags.quiet === true,
+        verbose: flags.verbose === true,
+        passwordStdin: flags["password-stdin"] === true,
+      });
+      break;
+    }
+    case "scan-bounties": {
+      if (!flags.dir) {
+        console.error("Usage: ade scan-bounties --dir <path> [--respond] [--dry-run] [--yes] [--min-score <n>] [--max-responses <n>] [--max-value <eth>] [--exclude <patterns>]");
+        process.exit(1);
+      }
+      const minScore = flags["min-score"] ? parseFloat(flags["min-score"] as string) : undefined;
+      if (minScore !== undefined && (isNaN(minScore) || minScore < 0 || minScore > 1)) {
+        console.error("Error: --min-score must be between 0 and 1");
+        process.exit(1);
+      }
+      const result = await scanBounties({
+        dir: flags.dir as string,
+        respond: flags.respond === true,
+        dryRun: flags["dry-run"] === true,
+        yes: flags.yes === true,
+        minScore,
+        maxResponses: flags["max-responses"] ? parseInt(flags["max-responses"] as string, 10) : undefined,
+        maxValue: flags["max-value"] as string,
+        exclude: flags.exclude as string,
       });
       output(result, format);
       break;

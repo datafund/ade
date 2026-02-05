@@ -2,7 +2,7 @@ import { $ } from "bun";
 import { chmod } from "node:fs/promises";
 
 const REPO = "datafund/ade";
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 export function getVersion(): string {
   return VERSION;

@@ -88,6 +88,9 @@ describe("CLIError", () => {
           code: "ERR_NOT_FOUND",
           message: "Resource missing",
           retryable: false,
+          suggestion: null,
+          retryAfterSeconds: null,
+          suggestedCommand: null,
         },
       });
     });
