@@ -2384,7 +2384,7 @@ export async function buyX402(
   }
 
   const baseUrl = getBaseUrl()
-  const downloadUrl = `${baseUrl}/api/v1/skills/${opts.skillId}/download`
+  const downloadUrl = `${baseUrl}/api/v1/skills/${encodeURIComponent(opts.skillId)}/download`
 
   // Re-download path (skip payment)
   if (opts.txHash) {
@@ -2397,6 +2397,7 @@ export async function buyX402(
 
     const response = await fetch(redownloadUrl.toString(), {
       headers: { 'X-Buyer-Address': account.address },
+      signal: AbortSignal.timeout(30_000),
     })
 
     if (!response.ok) {
@@ -2458,7 +2459,7 @@ export async function buyX402(
   console.error(`Requesting download...`)
   let initialRes: Response
   try {
-    initialRes = await fetch(downloadUrl)
+    initialRes = await fetch(downloadUrl, { signal: AbortSignal.timeout(30_000) })
   } catch (err) {
     throw new CLIError('ERR_API_ERROR', `Network error: ${(err as Error).message}`, 'Check your network connection')
   }
@@ -2502,7 +2503,15 @@ export async function buyX402(
   const supportedNetworks = Object.keys(X402_NETWORK_CONFIG)
   const req = requirements.find(r =>
     r.scheme === 'exact' && supportedNetworks.includes(r.network)
-  ) || requirements[0]
+  )
+  if (!req) {
+    const serverNetworks = requirements.map(r => `${r.scheme}/${r.network}`).join(', ')
+    throw new CLIError(
+      'ERR_PAYMENT_REQUIRED',
+      `No supported payment option found. Server offered: ${serverNetworks}`,
+      `Supported networks: ${supportedNetworks.join(', ')}`
+    )
+  }
 
   const paymentAmount = req.maxAmountRequired || req.amount || skill.price || '0'
   const payTo = req.payTo
@@ -2515,13 +2524,6 @@ export async function buyX402(
   }
 
   const networkConfig = X402_NETWORK_CONFIG[req.network]
-  if (!networkConfig) {
-    throw new CLIError(
-      'ERR_INVALID_ARGUMENT',
-      `Unsupported network: ${req.network}`,
-      `Supported: ${supportedNetworks.join(', ')}`
-    )
-  }
 
   console.error(`  Payment: ${formatUsdc(paymentAmount)} USDC on ${req.network}`)
   console.error(`  Pay to: ${payTo}`)
@@ -2579,6 +2581,7 @@ export async function buyX402(
   console.error(`Sending payment and downloading...`)
   const paidRes = await fetch(downloadUrl, {
     headers: { 'X-Payment': paymentHeader },
+    signal: AbortSignal.timeout(30_000),
   })
 
   if (paidRes.status === 402) {
