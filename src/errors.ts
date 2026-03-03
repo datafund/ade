@@ -28,6 +28,8 @@ export type ErrorCode =
   | 'ERR_STATE_CORRUPT'
   | 'ERR_STDIN_TIMEOUT'
   | 'ERR_DECRYPTION_FAILED'
+  | 'ERR_PAYMENT_FAILED'
+  | 'ERR_PAYMENT_REQUIRED'
 
 const EXIT_CODES: Record<ErrorCode, number> = {
   ERR_INVALID_ADDRESS: 1,
@@ -55,6 +57,8 @@ const EXIT_CODES: Record<ErrorCode, number> = {
   ERR_STATE_CORRUPT: 8,
   ERR_STDIN_TIMEOUT: 1,
   ERR_DECRYPTION_FAILED: 3,
+  ERR_PAYMENT_FAILED: 3,
+  ERR_PAYMENT_REQUIRED: 3,
 }
 
 const RETRYABLE: Set<ErrorCode> = new Set([

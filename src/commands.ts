@@ -2,7 +2,7 @@
  * All CLI command handlers. Each returns data; formatting handled by caller.
  */
 
-import { createPublicClient, createWalletClient, http, parseEther, formatEther, keccak256, concat, toHex, type PublicClient, type WalletClient, type Chain, type Hex } from 'viem'
+import { createPublicClient, createWalletClient, http, parseEther, formatEther, keccak256, concat, toHex, isAddress, type PublicClient, type WalletClient, type Chain, type Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { base, baseSepolia } from 'viem/chains'
 import * as secp256k1 from '@noble/secp256k1'
@@ -17,6 +17,7 @@ import { DataEscrowABI } from './abi/DataEscrow'
 import { storeEscrowKeys, getEscrowKeys } from './escrow-keys'
 import { getChainConfig, CHAIN_BY_ID, DEFAULT_CHAIN, DEFAULT_RPC, type ChainConfig } from './addresses'
 import { encryptForEscrow, decryptFromEscrow } from './crypto/escrow'
+import { encryptForX402 } from './crypto/x402'
 import {
   generateKeyPair,
   encryptKeyForBuyer,
@@ -2080,6 +2081,541 @@ export async function respond(opts: RespondOpts, keychain: Keychain = defaultKey
     bountyTitle: bounty.title,
     bountyReward: bounty.rewardAmount,
     linkedAt: new Date().toISOString(),
+  }
+}
+
+// ── x402 Sell Command ──
+
+export interface SellX402Opts {
+  /** Path to file to encrypt and sell */
+  file: string
+  /** Price in USDC smallest units (e.g., "1000000" for $1) */
+  price: string
+  /** Optional title for the data */
+  title?: string
+  /** Optional description */
+  description?: string
+  /** Marketplace category */
+  category?: string
+  /** Marketplace tags */
+  tags?: string[]
+  /** Skip confirmation prompt */
+  yes?: boolean
+  /** Dry run mode - validate without executing */
+  dryRun?: boolean
+}
+
+export interface SellX402Result {
+  contentHash: Hex
+  encryptedSize: number
+  fileSize: number
+  swarmRef: string
+  marketplace?: { id?: string }
+  keyBackupFile?: string
+}
+
+export interface SellX402DryRunResult {
+  dryRun: true
+  contentHash: Hex
+  fileSize: number
+  encryptedSize: number
+  priceUsdc: string
+  stampValid: boolean
+}
+
+function formatUsdc(smallestUnits: string): string {
+  const n = BigInt(smallestUnits || '0')
+  const whole = n / 1_000_000n
+  const frac = n % 1_000_000n
+  if (frac === 0n) return `$${whole}.00`
+  const fracStr = frac.toString().padStart(6, '0')
+  const trimmed = fracStr.replace(/0+$/, '')
+  const display = trimmed.length < 2 ? trimmed.padEnd(2, '0') : trimmed
+  return `$${whole}.${display}`
+}
+
+/**
+ * Sell data via x402 micropayment protocol.
+ *
+ * Unlike escrow sell, this:
+ * - Uses x402 encryption format (IV+tag+ct)
+ * - No chain transaction (no escrow contract)
+ * - No gas estimation
+ * - Price is in USDC smallest units
+ * - Publishes with payment_method: 'x402' and x402_content_key
+ * - Key backup to ~/.config/ade/x402-keys/
+ *
+ * @param opts - Sell options
+ * @param keychain - Keychain for secrets
+ * @returns SellX402Result or SellX402DryRunResult
+ */
+export async function sellX402(
+  opts: SellX402Opts,
+  keychain: Keychain = defaultKeychain
+): Promise<SellX402Result | SellX402DryRunResult> {
+  if (!opts.dryRun) {
+    requireConfirmation(opts)
+  }
+
+  // 1. Validate file exists and is readable
+  console.error(`Reading file: ${opts.file}`)
+  let fileData: Uint8Array
+  let fileSize: number
+  try {
+    const fileStat = await stat(opts.file)
+    if (!fileStat.isFile()) {
+      throw new CLIError('ERR_INVALID_ARGUMENT', `Path is not a file: ${opts.file}`)
+    }
+    fileSize = fileStat.size
+
+    if (fileSize > MAX_FILE_SIZE) {
+      throw new CLIError(
+        'ERR_INVALID_ARGUMENT',
+        `File too large: ${formatBytes(fileSize)}, max ${formatBytes(MAX_FILE_SIZE)}`,
+        'Consider splitting large files or using a streaming upload service'
+      )
+    }
+
+    fileData = new Uint8Array(await readFile(opts.file))
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new CLIError('ERR_NOT_FOUND', `File not found: ${opts.file}`)
+    }
+    if ((err as NodeJS.ErrnoException).code === 'EACCES') {
+      throw new CLIError('ERR_INVALID_ARGUMENT', `Permission denied: ${opts.file}`)
+    }
+    if (err instanceof CLIError) throw err
+    throw new CLIError('ERR_API_ERROR', `Failed to read file: ${(err as Error).message}`)
+  }
+  console.error(`  File size: ${formatBytes(fileSize)}`)
+
+  // 2. Encrypt file with x402 format
+  console.error(`Encrypting file (x402 format)...`)
+  const { encryptedData, key } = encryptForX402(fileData)
+  const keyHex = toHex(key) as Hex
+  console.error(`  Encrypted size: ${formatBytes(encryptedData.length)}`)
+
+  // 3. Compute content hash of encrypted data
+  const contentHash = keccak256(encryptedData)
+  console.error(`  Content hash: ${contentHash}`)
+
+  // 4. Get BEE_API (or use gateway)
+  const configuredBeeApi = await keychain.get('BEE_API') || process.env.BEE_API
+  const usingGateway = !configuredBeeApi
+  const beeApi = configuredBeeApi || SWARM_GATEWAY
+
+  let beeStamp: string | undefined
+
+  if (usingGateway) {
+    console.error(`Using FDS gateway: ${SWARM_GATEWAY}`)
+    console.error(`  No postage stamp required`)
+  } else {
+    const existingStamp = await getBeeStamp(keychain)
+    console.error(`Checking postage stamp...`)
+    beeStamp = await getOrCreateStamp(existingStamp, { beeApi }, (msg) => console.error(msg))
+    if (beeStamp !== existingStamp) {
+      await keychain.set('BEE_STAMP', beeStamp)
+      console.error(`  Saved new stamp to keychain: BEE_STAMP`)
+    } else {
+      console.error(`  Stamp valid`)
+    }
+  }
+
+  console.error(`  Price: ${formatUsdc(opts.price)} USDC`)
+
+  // 5. If dry-run, return validation results
+  if (opts.dryRun) {
+    console.error(`\nDry run complete. No uploads or publishes executed.`)
+    return {
+      dryRun: true as const,
+      contentHash,
+      fileSize,
+      encryptedSize: encryptedData.length,
+      priceUsdc: formatUsdc(opts.price),
+      stampValid: true,
+    }
+  }
+
+  await confirmAction('Upload and publish?', opts)
+
+  // 6. Upload encrypted data to Swarm
+  console.error(`Uploading to Swarm${usingGateway ? ' via gateway' : ''}...`)
+  const { reference: swarmRef } = await uploadToSwarm(encryptedData, { beeApi, batchId: beeStamp })
+  console.error(`  Swarm reference: ${swarmRef}`)
+
+  // 7. Publish to marketplace
+  let marketplace: { id?: string } | undefined
+  try {
+    const sxKey = await requireKey(keychain)
+    const account = privateKeyToAccount(sxKey)
+    const result = await apiPost<{ id?: string }>('/skills', {
+      seller: account.address,
+      title: opts.title || basename(opts.file, extname(opts.file)),
+      description: opts.description || `Data file: ${basename(opts.file)}`,
+      category: opts.category || 'other',
+      price: opts.price,
+      priceToken: 'USDC',
+      payment_method: 'x402',
+      x402_content_key: keyHex,
+      contentHash,
+      encryptedDataRef: swarmRef,
+      tags: opts.tags || [],
+    }, sxKey)
+    marketplace = { id: result?.id }
+    console.error(`Published to marketplace`)
+  } catch (err) {
+    console.error(`Warning: Marketplace publish failed: ${(err as Error).message}`)
+  }
+
+  // 8. Backup key to ~/.config/ade/x402-keys/
+  let keyBackupFile: string | undefined
+  try {
+    const keyDir = join(homedir(), '.config', 'ade', 'x402-keys')
+    mkdirSync(keyDir, { recursive: true, mode: 0o700 })
+    const skillId = marketplace?.id || contentHash.slice(0, 18)
+    keyBackupFile = join(keyDir, `x402-${skillId}.json`)
+    const backup = JSON.stringify({
+      contentHash,
+      key: keyHex,
+      swarmRef,
+      price: opts.price,
+      createdAt: new Date().toISOString(),
+    }, null, 2)
+    writeFileSync(keyBackupFile, backup, { mode: 0o600 })
+    console.error(`  Key backed up: ${keyBackupFile}`)
+  } catch (err) {
+    console.error(`  Warning: Key backup failed: ${(err as Error).message}`)
+  }
+
+  return {
+    contentHash,
+    encryptedSize: encryptedData.length,
+    fileSize,
+    swarmRef,
+    marketplace,
+    keyBackupFile,
+  }
+}
+
+// ── x402 Buy Command ──
+
+// USDC contract addresses by network
+const X402_NETWORK_CONFIG: Record<string, { chainId: number; usdcAddress: Hex }> = {
+  'eip155:8453': { chainId: 8453, usdcAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' },
+  'eip155:84532': { chainId: 84532, usdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e' },
+}
+
+// EIP-3009 TransferWithAuthorization types
+const TRANSFER_WITH_AUTHORIZATION_TYPES = {
+  TransferWithAuthorization: [
+    { name: 'from', type: 'address' },
+    { name: 'to', type: 'address' },
+    { name: 'value', type: 'uint256' },
+    { name: 'validAfter', type: 'uint256' },
+    { name: 'validBefore', type: 'uint256' },
+    { name: 'nonce', type: 'bytes32' },
+  ],
+} as const
+
+function randomNonce(): Hex {
+  const bytes = randomBytes(32)
+  return ('0x' + Buffer.from(bytes).toString('hex')) as Hex
+}
+
+interface PaymentRequirement {
+  scheme: string
+  network: string
+  maxAmountRequired?: string
+  amount?: string
+  asset: string
+  payTo: string
+  description?: string
+  resource?: string
+  extra?: Record<string, unknown>
+  maxTimeoutSeconds?: number
+}
+
+interface PaymentRequiredResponse {
+  x402Version: number
+  paymentRequirements?: PaymentRequirement[]
+  accepts?: PaymentRequirement[]
+  error?: string
+}
+
+export interface BuyX402Opts {
+  /** Skill ID to purchase */
+  skillId: string
+  /** Output file path */
+  output?: string
+  /** Re-download with existing payment tx hash */
+  txHash?: string
+  /** Skip confirmation prompt */
+  yes?: boolean
+}
+
+export interface BuyX402Result {
+  skillId: string
+  outputFile: string
+  sizeBytes: number
+  txHash: string
+  paymentAmount: string
+  paymentFormatted: string
+}
+
+/**
+ * Purchase an x402-priced skill via HTTP 402 micropayment.
+ *
+ * Flow:
+ *   1. Fetch skill details, verify payment_method === 'x402'
+ *   2. GET /skills/:id/download -> 402 with paymentRequirements
+ *   3. Sign EIP-3009 transferWithAuthorization for USDC
+ *   4. Re-send GET with X-Payment header -> receive decrypted content
+ *   5. Save content to output file
+ *
+ * Re-download: provide txHash to skip payment.
+ */
+export async function buyX402(
+  opts: BuyX402Opts,
+  keychain: Keychain = defaultKeychain
+): Promise<BuyX402Result> {
+  // Re-download path doesn't need confirmation
+  if (!opts.txHash) {
+    requireConfirmation(opts)
+  }
+
+  const baseUrl = getBaseUrl()
+  const downloadUrl = `${baseUrl}/api/v1/skills/${opts.skillId}/download`
+
+  // Re-download path (skip payment)
+  if (opts.txHash) {
+    const sxKey = await requireKey(keychain)
+    const account = privateKeyToAccount(sxKey)
+
+    console.error(`Re-downloading skill ${opts.skillId} with tx_hash...`)
+    const redownloadUrl = new URL(downloadUrl)
+    redownloadUrl.searchParams.set('tx_hash', opts.txHash)
+
+    const response = await fetch(redownloadUrl.toString(), {
+      headers: { 'X-Buyer-Address': account.address },
+    })
+
+    if (!response.ok) {
+      const body = await response.text()
+      throw new CLIError(
+        'ERR_DOWNLOAD_FAILED',
+        `Re-download failed (${response.status}): ${body}`,
+        'Ensure the tx_hash is correct and your address matches the original buyer'
+      )
+    }
+
+    const content = Buffer.from(await response.arrayBuffer())
+    const outputFile = opts.output || `x402_${opts.skillId}_data`
+    await writeFile(outputFile, content)
+    console.error(`  Saved to: ${outputFile} (${formatBytes(content.length)})`)
+
+    return {
+      skillId: opts.skillId,
+      outputFile,
+      sizeBytes: content.length,
+      txHash: opts.txHash,
+      paymentAmount: '0',
+      paymentFormatted: 're-download (no charge)',
+    }
+  }
+
+  // New purchase path
+  const sxKey = await requireKey(keychain)
+  const account = privateKeyToAccount(sxKey)
+
+  // Step 1: Fetch skill details
+  console.error(`Fetching skill details: ${opts.skillId}...`)
+  const skill = await apiFetch<{
+    id: string
+    title: string
+    price?: string
+    payment_method?: string
+    seller?: string
+  }>(`/skills/${opts.skillId}`)
+
+  if (skill.payment_method !== 'x402') {
+    const hint = skill.payment_method === 'escrow'
+      ? 'Use "ade buy" for escrow-based purchases.'
+      : skill.payment_method === 'free'
+        ? 'This is free content.'
+        : `This skill uses payment method "${skill.payment_method}".`
+    throw new CLIError(
+      'ERR_INVALID_ARGUMENT',
+      `Skill "${skill.title || opts.skillId}" uses payment method "${skill.payment_method}", not x402`,
+      hint
+    )
+  }
+
+  console.error(`  Title: ${skill.title}`)
+  console.error(`  Price: ${formatUsdc(skill.price || '0')} USDC`)
+  console.error(`  Seller: ${skill.seller}`)
+
+  // Step 2: GET download endpoint -> expect 402
+  console.error(`Requesting download...`)
+  let initialRes: Response
+  try {
+    initialRes = await fetch(downloadUrl)
+  } catch (err) {
+    throw new CLIError('ERR_API_ERROR', `Network error: ${(err as Error).message}`, 'Check your network connection')
+  }
+
+  if (initialRes.status !== 402) {
+    if (initialRes.ok) {
+      // Free content returned directly
+      const content = Buffer.from(await initialRes.arrayBuffer())
+      const outputFile = opts.output || `x402_${opts.skillId}_data`
+      await writeFile(outputFile, content)
+      console.error(`  Content downloaded for free (${formatBytes(content.length)})`)
+      return {
+        skillId: opts.skillId,
+        outputFile,
+        sizeBytes: content.length,
+        txHash: '',
+        paymentAmount: '0',
+        paymentFormatted: '$0.00 (free)',
+      }
+    }
+    const body = await initialRes.text()
+    throw new CLIError(
+      'ERR_API_ERROR',
+      `Expected 402 Payment Required but got ${initialRes.status}: ${body}`
+    )
+  }
+
+  const paymentRequired = await initialRes.json() as PaymentRequiredResponse
+
+  // Extract payment requirements
+  const requirements = paymentRequired.paymentRequirements || paymentRequired.accepts
+  if (!requirements || requirements.length === 0) {
+    throw new CLIError(
+      'ERR_PAYMENT_REQUIRED',
+      'Server returned 402 but no payment requirements',
+      'The server may be misconfigured. Try again later.'
+    )
+  }
+
+  // Find an "exact" scheme requirement for a supported network
+  const supportedNetworks = Object.keys(X402_NETWORK_CONFIG)
+  const req = requirements.find(r =>
+    r.scheme === 'exact' && supportedNetworks.includes(r.network)
+  ) || requirements[0]
+
+  const paymentAmount = req.maxAmountRequired || req.amount || skill.price || '0'
+  const payTo = req.payTo
+
+  if (!payTo) {
+    throw new CLIError('ERR_PAYMENT_REQUIRED', 'Payment requirement missing payTo address')
+  }
+  if (!isAddress(payTo)) {
+    throw new CLIError('ERR_PAYMENT_REQUIRED', `Invalid payTo address from server: "${payTo}"`)
+  }
+
+  const networkConfig = X402_NETWORK_CONFIG[req.network]
+  if (!networkConfig) {
+    throw new CLIError(
+      'ERR_INVALID_ARGUMENT',
+      `Unsupported network: ${req.network}`,
+      `Supported: ${supportedNetworks.join(', ')}`
+    )
+  }
+
+  console.error(`  Payment: ${formatUsdc(paymentAmount)} USDC on ${req.network}`)
+  console.error(`  Pay to: ${payTo}`)
+  console.error(`  From: ${account.address}`)
+
+  await confirmAction('Confirm payment?', opts)
+
+  // Step 3: Sign EIP-3009 transferWithAuthorization
+  console.error(`Signing USDC transfer authorization...`)
+  const now = Math.floor(Date.now() / 1000)
+  const nonce = randomNonce()
+
+  const authorization = {
+    from: account.address,
+    to: payTo as Hex,
+    value: BigInt(paymentAmount),
+    validAfter: BigInt(0),
+    validBefore: BigInt(now + 3600),
+    nonce,
+  }
+
+  const signature = await account.signTypedData({
+    domain: {
+      name: 'USD Coin',
+      version: '2',
+      chainId: networkConfig.chainId,
+      verifyingContract: networkConfig.usdcAddress,
+    },
+    types: TRANSFER_WITH_AUTHORIZATION_TYPES,
+    primaryType: 'TransferWithAuthorization',
+    message: authorization,
+  })
+
+  // Step 4: Construct x402 payment payload
+  const paymentPayload = {
+    x402Version: 2,
+    scheme: 'exact',
+    network: req.network,
+    payload: {
+      signature,
+      authorization: {
+        from: authorization.from,
+        to: authorization.to,
+        value: paymentAmount,
+        validAfter: '0',
+        validBefore: (now + 3600).toString(),
+        nonce,
+      },
+    },
+  }
+
+  const paymentHeader = Buffer.from(JSON.stringify(paymentPayload)).toString('base64')
+
+  // Step 5: Re-send download request with payment
+  console.error(`Sending payment and downloading...`)
+  const paidRes = await fetch(downloadUrl, {
+    headers: { 'X-Payment': paymentHeader },
+  })
+
+  if (paidRes.status === 402) {
+    const errorBody = await paidRes.json() as { error?: string; details?: string }
+    throw new CLIError(
+      'ERR_PAYMENT_FAILED',
+      `Payment rejected: ${errorBody.details || errorBody.error || 'Unknown reason'}`,
+      `Amount: ${formatUsdc(paymentAmount)}, payTo: ${payTo}, from: ${account.address}`
+    )
+  }
+
+  if (!paidRes.ok) {
+    const body = await paidRes.text()
+    throw new CLIError(
+      'ERR_DOWNLOAD_FAILED',
+      `Download failed after payment (${paidRes.status}): ${body}`
+    )
+  }
+
+  // Step 6: Save content
+  const content = Buffer.from(await paidRes.arrayBuffer())
+  const outputFile = opts.output || `x402_${opts.skillId}_data`
+  await writeFile(outputFile, content)
+  console.error(`  Saved to: ${outputFile} (${formatBytes(content.length)})`)
+
+  const txHash = paidRes.headers.get('X-Payment-TxHash') || ''
+  if (txHash) {
+    console.error(`  Transaction: ${txHash}`)
+  }
+
+  return {
+    skillId: opts.skillId,
+    outputFile,
+    sizeBytes: content.length,
+    txHash,
+    paymentAmount,
+    paymentFormatted: formatUsdc(paymentAmount),
   }
 }
 

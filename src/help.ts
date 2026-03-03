@@ -32,6 +32,10 @@ Data Escrow (Seller Flow):
   sell --dir <d>       Batch sell files from directory
   escrows              Manage data escrows
 
+x402 Micropayment:
+  sell --payment x402  Sell file via x402 (USDC, no gas)
+  buy-x402 <id>       Purchase x402-priced skill
+
 Data Escrow (Buyer Flow):
   buy <id>             Fund, wait for key, download, decrypt
 
@@ -67,8 +71,14 @@ Examples:
   # Seller: Sell data via escrow
   ade sell --file data.csv --price 0.1 --yes
 
+  # Seller: Sell via x402 micropayment (price in USDC smallest units)
+  ade sell --payment x402 --file data.csv --price 1000000 --yes
+
   # Buyer: Purchase escrowed data
   ade buy 42 --output ./data.csv --yes
+
+  # Buyer: Purchase x402-priced skill
+  ade buy-x402 abc123 --output ./file.dat --yes
 
   # Respond to bounty
   ade respond abc123 --file ./solution.zip --yes
@@ -94,6 +104,10 @@ export function showResourceHelp(resource: string): void {
     showBuyHelp()
     return
   }
+  if (resource === 'buy-x402') {
+    showBuyX402Help()
+    return
+  }
   if (resource === 'respond') {
     showRespondHelp()
     return
@@ -110,7 +124,7 @@ export function showResourceHelp(resource: string): void {
   if (!RESOURCES.includes(resource as Resource)) {
     console.log(`Unknown resource: ${resource}
 
-Available resources: ${RESOURCES.join(', ')}, sell, buy, respond, watch, scan-bounties
+Available resources: ${RESOURCES.join(', ')}, sell, buy, buy-x402, respond, watch, scan-bounties
 
 Run 'ade help' for overview.`)
     return
@@ -135,23 +149,30 @@ For detailed help on an action:
 }
 
 function showSellHelp(): void {
-  console.log(`ade sell - Sell data via escrow
+  console.log(`ade sell - Sell data via escrow or x402 micropayment
 
 USAGE:
   ade sell --file <path> --price <eth> [options]
   ade sell --dir <path> --price <eth> [--max-value <eth>] [options]
+  ade sell --payment x402 --file <path> --price <usdc-units> [options]
 
 DESCRIPTION:
-  The unified seller command that handles the complete escrow creation flow:
+  The unified seller command. Default mode uses escrow (on-chain):
   1. Reads and encrypts your file with AES-256-GCM
   2. Uploads encrypted data to Swarm
   3. Creates escrow on-chain with key commitment
   4. Stores encryption keys in OS keychain
   5. Publishes to marketplace
 
+  With --payment x402, uses HTTP 402 micropayment (no gas!):
+  1. Encrypts file with x402 AES-256-GCM format
+  2. Uploads encrypted data to Swarm
+  3. Publishes to marketplace with content key
+  4. Backs up key to ~/.config/ade/x402-keys/
+
 REQUIRED:
   --file <path>      File to encrypt and escrow (max 50MB)
-  --price <eth>      Price in ETH (e.g., "0.1")
+  --price <eth>      Price in ETH (escrow) or USDC smallest units (x402)
 
 OPTIONS:
   --title <text>     Title for the data
@@ -190,6 +211,16 @@ EXAMPLES:
 
   # Dry run batch
   ade sell --dir ./data/ --price 0.01 --dry-run
+
+  # x402: Sell for $1 USDC (no gas needed)
+  ade sell --payment x402 --file data.csv --price 1000000 --yes
+
+  # x402: Dry run
+  ade sell --payment x402 --file data.csv --price 500000 --dry-run
+
+PAYMENT METHODS:
+  --payment x402     Use HTTP 402 micropayment (USDC, no gas, no escrow)
+                     Price is in USDC smallest units (1000000 = $1.00)
 
 NOTES:
   --file and --dir are mutually exclusive.
@@ -354,6 +385,47 @@ OUTPUT:
 NOTE:
   The command will wait for the seller to reveal the key. If the seller
   doesn't reveal within the timeout, you can retry later or raise a dispute.`)
+}
+
+function showBuyX402Help(): void {
+  console.log(`ade buy-x402 - Purchase x402-priced skill via micropayment
+
+USAGE:
+  ade buy-x402 <skill-id> [options]
+
+DESCRIPTION:
+  Purchase a skill using HTTP 402 micropayment protocol:
+  1. Fetches skill details and verifies it uses x402 payment
+  2. Requests download endpoint (receives 402 with payment requirements)
+  3. Signs EIP-3009 USDC transferWithAuthorization on Base
+  4. Sends payment and downloads decrypted content
+  5. Saves to output file
+
+ARGUMENTS:
+  <skill-id>         The skill ID to purchase (required)
+
+OPTIONS:
+  --output <path>    Output file path (default: x402_<id>_data)
+  --tx-hash <hash>   Re-download with existing payment (no new charge)
+  --yes              Skip confirmation prompt
+
+REQUIRED SECRETS (set via 'ade set'):
+  SX_KEY            Private key for signing USDC authorization
+
+EXAMPLES:
+  # Purchase x402 skill
+  ade buy-x402 abc123 --output ./data.csv --yes
+
+  # Re-download with existing transaction
+  ade buy-x402 abc123 --tx-hash 0xabc... --output ./data.csv
+
+OUTPUT:
+  Returns skill ID, output file, size, transaction hash, and payment amount.
+
+NOTE:
+  Payment is in USDC via EIP-3009 (gasless for buyer).
+  The facilitator submits the USDC transfer on-chain.
+  Re-download is free with the original tx_hash.`)
 }
 
 function showRespondHelp(): void {

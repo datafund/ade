@@ -434,6 +434,27 @@ async function handleMeta(
         console.error("Error: --file and --dir are mutually exclusive");
         process.exit(1);
       }
+
+      // x402 payment method
+      if (flags.payment === 'x402') {
+        if (!flags.file || !flags.price) {
+          console.error("Usage: ade sell --payment x402 --file <path> --price <usdc-units> [--title <text>] [--description <text>] [--category <cat>] [--tags <a,b>] [--dry-run] [--yes]");
+          process.exit(1);
+        }
+        const result = await commands.sellX402({
+          file: flags.file as string,
+          price: flags.price as string,
+          title: flags.title as string,
+          description: flags.description as string,
+          category: flags.category as string,
+          tags: (flags.tags as string)?.split(','),
+          yes: flags.yes === true,
+          dryRun: flags["dry-run"] === true,
+        });
+        output(result, format);
+        break;
+      }
+
       if (flags.dir) {
         // Batch sell mode
         if (!flags.price) {
@@ -485,6 +506,21 @@ async function handleMeta(
         escrowId: cmdArgs[0],
         output: flags.output as string,
         waitTimeout: flags["wait-timeout"] ? parseInt(flags["wait-timeout"] as string, 10) : undefined,
+        yes: flags.yes === true,
+      });
+      output(result, format);
+      break;
+    }
+    case "buy-x402": {
+      // x402 micropayment purchase
+      if (!cmdArgs[0]) {
+        console.error("Usage: ade buy-x402 <skill-id> [--output <path>] [--tx-hash <hash>] [--yes]");
+        process.exit(1);
+      }
+      const result = await commands.buyX402({
+        skillId: cmdArgs[0],
+        output: flags.output as string,
+        txHash: flags["tx-hash"] as string,
         yes: flags.yes === true,
       });
       output(result, format);
