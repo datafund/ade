@@ -28,14 +28,23 @@ Secret Management:
   ls                   List all secret keys
 
 Data Escrow (Seller Flow):
-  sell                 Sell data via escrow (encrypt + upload + escrow)
+  sell --file <f>      Sell single file via escrow
+  sell --dir <d>       Batch sell files from directory
   escrows              Manage data escrows
+
+x402 Micropayment:
+  sell --payment x402  Sell file via x402 (USDC, no gas)
+  buy-x402 <id>       Purchase x402-priced skill
 
 Data Escrow (Buyer Flow):
   buy <id>             Fund, wait for key, download, decrypt
 
 Bounty Response:
   respond <id>         Respond to bounty with deliverable
+
+Automation:
+  watch                Watch escrows, auto-complete lifecycle
+  scan-bounties        Match local files to open bounties
 
 Account Management:
   account              Manage Fairdrop accounts for ECDH key exchange
@@ -62,8 +71,14 @@ Examples:
   # Seller: Sell data via escrow
   ade sell --file data.csv --price 0.1 --yes
 
+  # Seller: Sell via x402 micropayment (price in USDC smallest units)
+  ade sell --payment x402 --file data.csv --price 1000000 --yes
+
   # Buyer: Purchase escrowed data
   ade buy 42 --output ./data.csv --yes
+
+  # Buyer: Purchase x402-priced skill
+  ade buy-x402 abc123 --output ./file.dat --yes
 
   # Respond to bounty
   ade respond abc123 --file ./solution.zip --yes
@@ -89,15 +104,27 @@ export function showResourceHelp(resource: string): void {
     showBuyHelp()
     return
   }
+  if (resource === 'buy-x402') {
+    showBuyX402Help()
+    return
+  }
   if (resource === 'respond') {
     showRespondHelp()
+    return
+  }
+  if (resource === 'watch') {
+    showWatchHelp()
+    return
+  }
+  if (resource === 'scan-bounties') {
+    showScanBountiesHelp()
     return
   }
 
   if (!RESOURCES.includes(resource as Resource)) {
     console.log(`Unknown resource: ${resource}
 
-Available resources: ${RESOURCES.join(', ')}, sell, buy, respond
+Available resources: ${RESOURCES.join(', ')}, sell, buy, buy-x402, respond, watch, scan-bounties
 
 Run 'ade help' for overview.`)
     return
@@ -122,27 +149,44 @@ For detailed help on an action:
 }
 
 function showSellHelp(): void {
-  console.log(`ade sell - Sell data via escrow
+  console.log(`ade sell - Sell data via escrow or x402 micropayment
 
 USAGE:
   ade sell --file <path> --price <eth> [options]
+  ade sell --dir <path> --price <eth> [--max-value <eth>] [options]
+  ade sell --payment x402 --file <path> --price <usdc-units> [options]
 
 DESCRIPTION:
-  The unified seller command that handles the complete escrow creation flow:
+  The unified seller command. Default mode uses escrow (on-chain):
   1. Reads and encrypts your file with AES-256-GCM
   2. Uploads encrypted data to Swarm
   3. Creates escrow on-chain with key commitment
   4. Stores encryption keys in OS keychain
+  5. Publishes to marketplace
+
+  With --payment x402, uses HTTP 402 micropayment (no gas!):
+  1. Encrypts file with x402 AES-256-GCM format
+  2. Uploads encrypted data to Swarm
+  3. Publishes to marketplace with content key
+  4. Backs up key to ~/.config/ade/x402-keys/
 
 REQUIRED:
   --file <path>      File to encrypt and escrow (max 50MB)
-  --price <eth>      Price in ETH (e.g., "0.1")
+  --price <eth>      Price in ETH (escrow) or USDC smallest units (x402)
 
 OPTIONS:
   --title <text>     Title for the data
   --description <text>  Description
+  --category <cat>   Marketplace category
+  --tags <t1,t2>     Comma-separated tags
   --dry-run          Validate everything without executing (no uploads, no tx)
   --yes              Skip confirmation prompt
+
+BATCH OPTIONS (--dir mode):
+  --dir <path>       Batch sell: encrypt and escrow all files in directory
+  --max-value <eth>  Max price per file (required with --dir --yes)
+  --max-files <n>    Max files to process (default: 50)
+  --skip-existing    Skip files already listed on marketplace
 
 REQUIRED SECRETS (set via 'ade set'):
   SX_KEY            Private key for transactions
@@ -150,7 +194,7 @@ REQUIRED SECRETS (set via 'ade set'):
   BEE_STAMP         Postage batch ID (64 hex chars)
 
 EXAMPLES:
-  # Sell data from CSV file
+  # Sell single file
   ade sell --file ./data.csv --price 0.01
 
   # Dry run to validate without spending gas
@@ -158,6 +202,30 @@ EXAMPLES:
 
   # Sell with metadata and skip confirmation
   ade sell --file ./report.pdf --price 0.1 --title "Q4 Report" --yes
+
+  # Batch sell a directory
+  ade sell --dir ./data/ --price 0.01 --yes --max-value 0.1
+
+  # Batch sell with skip existing
+  ade sell --dir ./data/ --price 0.01 --skip-existing --yes --max-value 0.1
+
+  # Dry run batch
+  ade sell --dir ./data/ --price 0.01 --dry-run
+
+  # x402: Sell for $1 USDC (no gas needed)
+  ade sell --payment x402 --file data.csv --price 1000000 --yes
+
+  # x402: Dry run
+  ade sell --payment x402 --file data.csv --price 500000 --dry-run
+
+PAYMENT METHODS:
+  --payment x402     Use HTTP 402 micropayment (USDC, no gas, no escrow)
+                     Price is in USDC smallest units (1000000 = $1.00)
+
+NOTES:
+  --file and --dir are mutually exclusive.
+  In batch mode, filenames are used as titles.
+  With --yes, encryption keys are stored in keychain and omitted from output.
 
 OUTPUT:
   Returns escrow ID, transaction hash, Swarm reference, and encryption keys.
@@ -174,6 +242,102 @@ NEXT STEPS:
     ade escrows reveal-key <id> --yes
     # After 24h dispute window
     ade escrows claim <id> --yes`)
+}
+
+function showWatchHelp(): void {
+  console.log(`ade watch - Watch escrows and auto-complete lifecycle
+
+Usage: ade watch [options]
+
+Watch escrows and auto-complete lifecycle (commit, reveal, claim, download).
+Outputs machine-readable NDJSON events on stdout.
+
+Modes:
+  ade watch [--yes]             Daemon mode (long-running, NDJSON on stdout)
+  ade watch --once              Single poll cycle then exit
+  ade watch --status            Query running instance status
+  ade watch --reset-state       Reset corrupted state file
+
+Daemon Options:
+  --yes                   Non-interactive mode (requires --max-value)
+  --dry-run               Show actions without executing transactions
+  --seller-only           Only handle seller duties (commit, reveal, claim)
+  --buyer-only            Only handle buyer duties (download, decrypt)
+  --interval <seconds>    Poll interval (default: 20)
+  --download-dir <path>   Directory for buyer downloads (default: cwd)
+  --escrow-ids <ids>      Comma-separated escrow IDs to watch
+  --password-stdin        Read Fairdrop account password from stdin for ECDH
+
+Spending Limits:
+  --max-value <ETH>       Max single escrow value (required with --yes, max 10 ETH)
+  --max-daily <ETH>       Max daily cumulative value (resets UTC midnight)
+  --max-cumulative <ETH>  Lifetime cumulative cap (never resets, persisted in keychain)
+  --max-tx-per-cycle <n>  Max transactions per poll cycle (default: 10)
+
+Output:
+  --quiet                 Suppress stderr logs (NDJSON only on stdout)
+  --verbose               Debug-level stderr logs
+
+NDJSON Protocol:
+  Stdout emits one JSON object per line. Events: hello, heartbeat, cycle_start,
+  escrow_found, key_committed, key_revealed, download_start, download_complete,
+  claim_executed, error, spending_limit, cycle_end, shutdown.
+
+Required Secrets:
+  SX_KEY                  Ethereum private key (ade set SX_KEY)
+
+Examples:
+  ade watch --yes --max-value 0.1 --max-daily 1.0
+  ade watch --once --dry-run
+  ade watch --status
+
+Exit Codes:
+  0  Clean shutdown       5  Spending limit exceeded
+  1  Invalid arguments    7  Another instance running
+  2  Missing credentials  8  Corrupted state file
+  3  Chain error`)
+}
+
+function showScanBountiesHelp(): void {
+  console.log(`ade scan-bounties - Match local files against open bounties
+
+Usage: ade scan-bounties --dir <path> [options]
+
+Match local files against open bounties on the marketplace.
+
+Options:
+  --dir <path>            Directory to scan (required)
+  --respond               Auto-respond to best matches (creates escrows)
+  --dry-run               With --respond: show what would happen
+  --yes                   Non-interactive (requires --max-value with --respond)
+  --min-score <0-1>       Minimum match score (default: 0, forced 0.5 with --respond --yes)
+  --max-responses <n>     Max bounties to respond to (default: 3, max: 10)
+  --max-value <ETH>       Max bounty reward value per response (required with --respond --yes)
+  --exclude <patterns>    Comma-separated glob patterns to exclude (added to defaults)
+
+Default Excludes:
+  *.env, *.pem, *.key, *.p12, *.pfx, .ssh/*, .gnupg/*, .config/*,
+  id_rsa*, *.sqlite, *.db, *.log, node_modules/*
+
+Scoring:
+  Simple keyword overlap between filename terms and bounty terms.
+  Score = matched_terms / total_bounty_terms. Agents can pipe JSON output
+  through their own LLM-based relevance scoring for better results.
+
+Auth Escalation:
+  Base auth is "none" (read-only scan). When --respond is set, auth escalates
+  to "chain" (requires SX_KEY for escrow creation).
+
+Examples:
+  ade scan-bounties --dir ./knowledge/
+  ade scan-bounties --dir ./data/ --respond --dry-run
+  ade scan-bounties --dir ./data/ --respond --yes --max-value 0.05 --max-responses 3
+  ade scan-bounties --min-score 0.5 --dir ./data/
+
+Exit Codes:
+  0  Success (even zero matches)
+  1  Configuration error
+  6  Partial response failures (some --respond calls failed)`)
 }
 
 function showBuyHelp(): void {
@@ -221,6 +385,47 @@ OUTPUT:
 NOTE:
   The command will wait for the seller to reveal the key. If the seller
   doesn't reveal within the timeout, you can retry later or raise a dispute.`)
+}
+
+function showBuyX402Help(): void {
+  console.log(`ade buy-x402 - Purchase x402-priced skill via micropayment
+
+USAGE:
+  ade buy-x402 <skill-id> [options]
+
+DESCRIPTION:
+  Purchase a skill using HTTP 402 micropayment protocol:
+  1. Fetches skill details and verifies it uses x402 payment
+  2. Requests download endpoint (receives 402 with payment requirements)
+  3. Signs EIP-3009 USDC transferWithAuthorization on Base
+  4. Sends payment and downloads decrypted content
+  5. Saves to output file
+
+ARGUMENTS:
+  <skill-id>         The skill ID to purchase (required)
+
+OPTIONS:
+  --output <path>    Output file path (default: x402_<id>_data)
+  --tx-hash <hash>   Re-download with existing payment (no new charge)
+  --yes              Skip confirmation prompt
+
+REQUIRED SECRETS (set via 'ade set'):
+  SX_KEY            Private key for signing USDC authorization
+
+EXAMPLES:
+  # Purchase x402 skill
+  ade buy-x402 abc123 --output ./data.csv --yes
+
+  # Re-download with existing transaction
+  ade buy-x402 abc123 --tx-hash 0xabc... --output ./data.csv
+
+OUTPUT:
+  Returns skill ID, output file, size, transaction hash, and payment amount.
+
+NOTE:
+  Payment is in USDC via EIP-3009 (gasless for buyer).
+  The facilitator submits the USDC transfer on-chain.
+  Re-download is free with the original tx_hash.`)
 }
 
 function showRespondHelp(): void {

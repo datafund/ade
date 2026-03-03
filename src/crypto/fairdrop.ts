@@ -207,14 +207,20 @@ export function publicKeyToHex(publicKey: Uint8Array): `0x${string}` {
   return `0x${hex}` as `0x${string}`
 }
 
+const MAX_HEX_BYTES = 256  // Max 256 bytes (512 hex chars) — covers secp256k1 keys (33B), AES keys (32B), and ECDH payloads (~93B)
+
 /**
  * Parse hex string (with or without 0x) to Uint8Array.
+ * Validates input: even length, valid hex chars, max length.
  *
  * @param hex - Hex string
  * @returns Bytes
  */
 export function hexToBytes(hex: string): Uint8Array {
   const clean = hex.startsWith('0x') ? hex.slice(2) : hex
+  if (clean.length % 2 !== 0) throw new Error('Hex string must have even length')
+  if (clean.length > MAX_HEX_BYTES * 2) throw new Error(`Hex string too long: ${clean.length / 2} bytes (max ${MAX_HEX_BYTES})`)
+  if (!/^[0-9a-fA-F]*$/.test(clean)) throw new Error('Invalid hex characters')
   const bytes = new Uint8Array(clean.length / 2)
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)

@@ -11,8 +11,25 @@ export function getBaseUrl(): string {
   return (process.env.SX_API || 'https://agents.datafund.io').trim()
 }
 
+function validateApiUrl(url: string): void {
+  try {
+    const parsed = new URL(url)
+    const isLocalhost = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '::1'
+    if (parsed.protocol !== 'https:' && !isLocalhost) {
+      throw new CLIError('ERR_INVALID_ARGUMENT',
+        `API URL must use HTTPS: ${url}`,
+        'Set a secure URL: ade set SX_API https://agents.datafund.io')
+    }
+  } catch (err) {
+    if (err instanceof CLIError) throw err
+    throw new CLIError('ERR_INVALID_ARGUMENT', `Invalid API URL: ${url}`)
+  }
+}
+
 export async function apiFetch<T = unknown>(path: string, opts?: RequestInit): Promise<T> {
-  const url = `${getBaseUrl()}/api/v1${path}`
+  const baseUrl = getBaseUrl()
+  validateApiUrl(baseUrl)
+  const url = `${baseUrl}/api/v1${path}`
 
   let res: Response
   try {

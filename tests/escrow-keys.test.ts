@@ -1,10 +1,23 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import { storeEscrowKeys, getEscrowKeys, deleteEscrowKeys, listEscrowIds, type EscrowKeys } from "../src/escrow-keys";
 import * as mock from "./keychain/mock";
 
 describe("escrow-keys", () => {
+  let tmpMcpDir: string;
+
   beforeEach(() => {
     mock.clear();
+    // Isolate MCP bridge from real ~/.datafund/escrow-keys/
+    tmpMcpDir = mkdtempSync(join(tmpdir(), "ade-test-mcp-"));
+    process.env.ADE_MCP_KEYS_DIR = tmpMcpDir;
+  });
+
+  afterEach(() => {
+    delete process.env.ADE_MCP_KEYS_DIR;
+    try { rmSync(tmpMcpDir, { recursive: true }); } catch {}
   });
 
   describe("storeEscrowKeys", () => {
