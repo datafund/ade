@@ -601,6 +601,13 @@ async function handleMeta(
 }
 
 async function main() {
+  // Load SX_API from keychain into process.env so getBaseUrl() picks it up.
+  // Keychain takes priority (user explicitly ran `ade set SX_API ...`).
+  const keychainApi = await getSecret('SX_API')
+  if (keychainApi.success) {
+    process.env.SX_API = keychainApi.value
+  }
+
   const format = detectFormat(
     parsed.type === "resource" || parsed.type === "meta"
       ? (parsed.flags?.format as string)

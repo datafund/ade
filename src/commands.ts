@@ -2256,7 +2256,7 @@ export async function sellX402(
       price: opts.price,
       priceToken: 'USDC',
       payment_method: 'x402',
-      x402_content_key: keyHex,
+      x402_content_key: keyHex.startsWith('0x') ? keyHex.slice(2) : keyHex,
       contentHash,
       encryptedDataRef: swarmRef,
       tags: opts.tags || [],
@@ -2299,10 +2299,10 @@ export async function sellX402(
 
 // ── x402 Buy Command ──
 
-// USDC contract addresses by network
-const X402_NETWORK_CONFIG: Record<string, { chainId: number; usdcAddress: Hex }> = {
-  'eip155:8453': { chainId: 8453, usdcAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' },
-  'eip155:84532': { chainId: 84532, usdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e' },
+// USDC contract config by network (name differs: mainnet "USD Coin", testnet "USDC")
+const X402_NETWORK_CONFIG: Record<string, { chainId: number; usdcAddress: Hex; usdcName: string }> = {
+  'eip155:8453': { chainId: 8453, usdcAddress: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', usdcName: 'USD Coin' },
+  'eip155:84532': { chainId: 84532, usdcAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', usdcName: 'USDC' },
 }
 
 // EIP-3009 TransferWithAuthorization types
@@ -2547,7 +2547,7 @@ export async function buyX402(
 
   const signature = await account.signTypedData({
     domain: {
-      name: 'USD Coin',
+      name: networkConfig.usdcName,
       version: '2',
       chainId: networkConfig.chainId,
       verifyingContract: networkConfig.usdcAddress,
