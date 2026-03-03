@@ -70,6 +70,9 @@ export function encryptForX402(plaintext: Uint8Array): X402EncryptionResult {
  * @throws Error if data is too short or decryption fails
  */
 export function decryptFromX402(encryptedData: Uint8Array, key: Uint8Array): Uint8Array {
+  if (key.length !== KEY_LENGTH) {
+    throw new Error(`Key must be ${KEY_LENGTH} bytes, got ${key.length}`)
+  }
   if (encryptedData.length < IV_LENGTH + AUTH_TAG_LENGTH) {
     throw new Error('Encrypted data too short')
   }

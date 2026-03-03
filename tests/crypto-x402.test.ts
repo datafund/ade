@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test"
 import { createDecipheriv } from "crypto"
 import { encryptForX402, decryptFromX402 } from "../src/crypto/x402"
-import { encryptForEscrow } from "../src/crypto/escrow"
+import { encryptForEscrow, decryptFromEscrow } from "../src/crypto/escrow"
 
 const IV_LENGTH = 12
 const AUTH_TAG_LENGTH = 16
@@ -72,6 +72,16 @@ describe("crypto/x402", () => {
       // Both ciphertexts should equal plaintext length
       expect(escrowCiphertext.length).toBe(plaintext.length)
       expect(x402Ciphertext.length).toBe(plaintext.length)
+
+      // Prove format incompatibility: x402 data fails with escrow decryptor
+      expect(() => {
+        decryptFromEscrow({ encryptedData: x402Result.encryptedData, key: x402Result.key })
+      }).toThrow()
+
+      // Prove format incompatibility: escrow data fails with x402 decryptor
+      expect(() => {
+        decryptFromX402(escrowResult.encryptedData, escrowResult.key)
+      }).toThrow()
     })
 
     it("should fail to decrypt with wrong key", () => {
@@ -104,6 +114,16 @@ describe("crypto/x402", () => {
   })
 
   describe("decryptFromX402", () => {
+    it("should throw on wrong key length", () => {
+      const plaintext = new TextEncoder().encode("key length test")
+      const { encryptedData } = encryptForX402(plaintext)
+
+      const shortKey = new Uint8Array(16)
+      expect(() => {
+        decryptFromX402(encryptedData, shortKey)
+      }).toThrow("Key must be 32 bytes, got 16")
+    })
+
     it("should throw on data shorter than 28 bytes", () => {
       const tooShort = new Uint8Array(27) // Less than IV(12) + authTag(16)
       const key = new Uint8Array(32)
