@@ -257,6 +257,50 @@ export async function skillsShow(id: string) {
   return apiFetch(`/skills/${encodeURIComponent(id)}`)
 }
 
+export async function skillsSales(sellerAddress: string) {
+  if (!isAddress(sellerAddress)) {
+    throw new CLIError('ERR_INVALID_ARGUMENT', 'Invalid seller address', 'Provide a valid Ethereum address (0x...)')
+  }
+
+  const data = await apiFetch<{ items: Array<{ id: string; title: string; total_sales: number; escrow_id: number | null }> }>(
+    `/skills?seller=${encodeURIComponent(sellerAddress)}&status=active&limit=50`
+  )
+
+  const skills = data.items ?? []
+  const results = await Promise.all(skills.map(async (skill) => {
+    try {
+      const info = await apiFetch<{ status: string; available_copies?: number; total_sales?: number }>(
+        `/skills/${encodeURIComponent(skill.id)}/purchase-info`
+      )
+      return {
+        skill_id: skill.id,
+        title: skill.title,
+        status: info.status,
+        available: info.available_copies ?? 0,
+        total_sales: info.total_sales ?? skill.total_sales,
+        needs_restock: (info.available_copies ?? 0) <= 1,
+      }
+    } catch {
+      return {
+        skill_id: skill.id,
+        title: skill.title,
+        status: 'unknown',
+        available: 0,
+        total_sales: skill.total_sales,
+        needs_restock: true,
+      }
+    }
+  }))
+
+  const lowStock = results.filter(r => r.needs_restock)
+  return {
+    skills: results,
+    total_skills: results.length,
+    low_stock: lowStock.length,
+    alerts: lowStock.map(s => `"${s.title}" has ${s.available} copies left.`),
+  }
+}
+
 export async function bountiesList(opts: ListOpts & { status?: string }) {
   let q = listParams(opts)
   if (opts.status) q += `&status=${encodeURIComponent(opts.status)}`

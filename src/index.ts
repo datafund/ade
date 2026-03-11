@@ -174,6 +174,13 @@ async function handleResource(
             category: flags.category as string,
           });
           break;
+        case "sales":
+          if (!cmdArgs[0]) {
+            console.error("Usage: ade skills sales <seller_address>");
+            process.exit(1);
+          }
+          result = await commands.skillsSales(cmdArgs[0]);
+          break;
         default:
           console.error(`Unknown action: skills ${action}`);
           process.exit(1);

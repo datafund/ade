@@ -6,7 +6,7 @@ const RESOURCES = ['skills', 'bounties', 'agents', 'escrows', 'wallets', 'config
 type Resource = typeof RESOURCES[number]
 
 const ACTIONS: Record<Resource, string[]> = {
-  skills: ['list', 'show', 'vote', 'comment', 'create'],
+  skills: ['list', 'show', 'vote', 'comment', 'create', 'sales'],
   bounties: ['list', 'show', 'create'],
   agents: ['list', 'show'],
   escrows: ['list', 'show', 'create', 'fund', 'commit-key', 'reveal-key', 'claim', 'status'],
@@ -618,6 +618,21 @@ Authentication:
 
 Examples:
   ade skills create --title "Data Analysis" --price 0.1`
+
+    case 'skills sales':
+      return `ade skills sales - Check sales status and inventory
+
+Usage:
+  ade skills sales <seller_address>
+
+Arguments:
+  seller_address  Ethereum address of the seller (0x...)
+
+Shows available copies, total sales, and low-stock alerts for all
+active skills listed by the given seller address.
+
+Examples:
+  ade skills sales 0x1234...abcd`
 
     case 'bounties list':
       return `ade bounties list - List bounties
