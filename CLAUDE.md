@@ -306,3 +306,20 @@ ade account delete <subdomain>  # Delete account
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code.
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
+
+## Datacore Space Context
+
+This project lives inside a Datacore space. Session lifecycle commands are available:
+
+- `/wrap-up` — write session entry to team journal, commit and push
+- `/continue` — resume from yesterday's continuation notes; `--save` persists current work
+- `/standup` — generate/post standup from recent team journals
+- `/today` — daily briefing (incremental if already generated)
+
+| Key | Value |
+|-----|-------|
+| Space | `3-fds` |
+| Journal | `~/Data/3-fds/journal/YYYY-MM-DD.md` |
+| Org | `~/Data/3-fds/org/next_actions.org` |
+
+When `/wrap-up` runs, use the team journal schema: `## @contributor` narrative sections + `## Session Metadata` YAML block.
